@@ -1,0 +1,26 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+fastapi = {extras = ["standard"], version = "*"}
+alembic = "*"
+passlib = {extras = ["bcrypt"], version = "*"}
+python-jose = "*"
+pydantic-settings = "*"
+asyncpg = "*"
+python-dotenv = "*"
+websockets = "*"
+pydantic = "*"
+docker = "*"
+psycopg2-binary = "*"
+celery = "*"
+redis = "*"
+cryptography = "*"
+binance-sdk-derivatives-trading-usds-futures = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.13"

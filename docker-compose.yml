@@ -1,0 +1,245 @@
+# docker-compose.yml
+
+services:
+  # ─────────────── Infra ───────────────
+  redis:
+    image: redis:7.2
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    env_file: .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports: ["5432:5432"]
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h localhost -p 5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    env_file: .env
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["${PGADMIN_PORT:-5050}:80"]
+    volumes: [pgadmin-data:/var/lib/pgadmin]
+    restart: unless-stopped
+
+  # ─────────────── DB migration ───────────────
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "-c", "alembic.ini", "upgrade", "head"]
+    restart: "no"
+    volumes:
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini:ro
+
+  # ─────────────── FastAPI app ───────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+      - UVICORN_PORT=${UVICORN_PORT:-8000}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL}
+      - DB_URL=${DB_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+    ports: ["8000:8000"]
+    volumes:
+      - ./app:/app/app
+      - ./app/services:/app/services
+      - ./app/scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    restart: unless-stopped
+
+  # ─────────────── Data pipeline ───────────────
+  ingestor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m}
+      - INGESTOR_LOG_LEVEL=INFO
+      - INGESTOR_LOG_1M=true
+      - BINANCE_MARKET=um_futures
+    working_dir: /app
+    command: ["python", "-m", "services.ingestor.main"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./app/services/ingestor:/app/services/ingestor
+
+  calc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m}
+      - PRICE_TICK_DEFAULT=0.01
+    working_dir: /app
+    command: ["python", "-m", "services.calc.main"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      ingestor:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./app/services/calc:/app/services/calc
+
+  # ─────────────── Signal poller (calc → Celery) ───────────────
+  poller:
+    build:
+      context: .
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - POLLER_SYMBOLS=${POLLER_SYMBOLS:-BTCUSDT}
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    working_dir: /app
+    command: ["/bin/sh", "-lc", "/app/scripts/run_poller.sh ${POLLER_SYMBOLS}"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      calc:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./app:/app/app
+      - ./app/services:/app/services
+      - ./app/scripts:/app/scripts
+
+
+  # ─────────────── Celery workers ───────────────
+  worker-signals:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TZ=UTC
+      - TESTNET_API_KEY=${TESTNET_API_KEY}
+      - TESTNET_API_SECRET=${TESTNET_API_SECRET}
+      - BASE_PATH=${BASE_PATH}
+    working_dir: /app
+    command: ["/bin/sh", "-c", "/app/scripts/run_worker_signals.sh"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./app:/app/app
+      - ./app/services:/app/services
+      - ./app/scripts:/app/scripts
+
+  worker-reconcile:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TZ=UTC
+    working_dir: /app
+    command: ["/bin/sh", "-c", "/app/scripts/run_worker_reconcile.sh"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./app:/app/app
+      - ./app/services:/app/services
+      - ./app/scripts:/app/scripts
+
+  # Optional: Celery Beat (enable if you set RECONCILE_SYMBOLS)
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TZ=UTC
+      - RECONCILE_SYMBOLS=${RECONCILE_SYMBOLS}
+      - RECONCILE_INTERVAL_SECONDS=${RECONCILE_INTERVAL_SECONDS:-45}
+    working_dir: /app
+    command: ["/bin/sh", "-c", "/app/scripts/run_beat.sh"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./app:/app/app
+      - ./app/services:/app/services
+      - ./app/scripts:/app/scripts
+
+volumes:
+  redis-data:
+  pg-data:
+  pgadmin-data:
