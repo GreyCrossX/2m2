@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
 from app.config import settings
 from services.ingestor.keys import st_market    # 2m input stream
@@ -62,10 +62,30 @@ async def _trim_task_sym(sym: str):
             LOG.warning("[calc %s] trim error: %s", sym, e)
         await asyncio.sleep(60)
 
+def _fmt_none(x: Optional[float]) -> str:
+    return "" if x is None else f"{x}"
+
+def _calc_long_levels(ind_high: float, ind_low: float) -> tuple[float, float]:
+    # LONG: entry above indicator high; stop below indicator low
+    trigger = ind_high + PRICE_TICK
+    stop    = ind_low  - PRICE_TICK
+    return trigger, stop
+
+def _calc_short_levels(ind_high: float, ind_low: float) -> tuple[float, float]:
+    # SHORT: entry below indicator low; stop above indicator high
+    trigger = ind_low  - PRICE_TICK
+    stop    = ind_high + PRICE_TICK
+    return trigger, stop
+
 async def consume_symbol(sym: str):
     """
     Consume 2m market stream for `sym`, compute SMA20/200, regime, indicator candle,
-    and publish snapshot + calc event + high-level signal events for Celery.
+    and publish snapshot + calc event + high-level signal events for Celery workers.
+
+    Signal policy (per spec):
+      - neutral -> long/short : ARM (with indicator candle info and trigger/stop)
+      - long/short -> neutral : DISARM
+      - long <-> short (direct flip): DISARM (old) then ARM (new) on the same bar
     """
     stream_in  = market_stream(sym)
     stream_out = indicator_stream(sym)
@@ -76,9 +96,9 @@ async def consume_symbol(sym: str):
     sma200 = SMA(200)
     istate = IndicatorState(price_tick=PRICE_TICK)
 
-    # Track last indicator we announced to avoid duplicate ARMs
-    last_indicator_ts: Optional[int] = None
-    last_regime: str = "neutral"
+    # ── state for signal emission ─────────────────────────────────────────────
+    last_regime: str = "neutral"             # previous bar regime
+    armed_side: Optional[str] = None         # "long" | "short" if armed, else None
 
     # launch optional time-based trimmer
     asyncio.create_task(_trim_task_sym(sym))
@@ -116,77 +136,131 @@ async def consume_symbol(sym: str):
 
             regime = choose_regime(close, v20, v200)
 
-            # Update indicator candle state (and compute triggers/stops)
+            # Update indicator candle state (indicator = last red for long / last green for short)
             cres = istate.update(
                 Candle(ts=ts, open=open_, high=high, low=low, close=close, color=color),
                 regime
             )
+            ind = cres.indicator  # Candle | None
 
-            # Build calc snapshot/event (strings)
+            # ── publish calc snapshot/event ───────────────────────────────────
             out: Dict[str, str] = {
                 "v": "1",
                 "sym": sym, "tf": "2m",
                 "ts": str(ts),
                 "close": str(close), "open": str(open_), "high": str(high), "low": str(low), "color": color,
-                "ma20":  "" if v20  is None else f"{v20}",
-                "ma200": "" if v200 is None else f"{v200}",
+                "ma20":  _fmt_none(v20),
+                "ma200": _fmt_none(v200),
                 "regime": regime,
-                "ind_ts":   "" if not cres.indicator else str(cres.indicator.ts),
-                "ind_high": "" if not cres.indicator else f"{cres.indicator.high}",
-                "ind_low":  "" if not cres.indicator else f"{cres.indicator.low}",
-                "trigger_long":  "" if cres.trigger_long  is None else f"{cres.trigger_long}",
-                "stop_long":     "" if cres.stop_long     is None else f"{cres.stop_long}",
-                "trigger_short": "" if cres.trigger_short is None else f"{cres.trigger_short}",
-                "stop_short":    "" if cres.stop_short    is None else f"{cres.stop_short}",
+                "ind_ts":   "" if not ind else str(ind.ts),
+                "ind_high": "" if not ind else f"{ind.high}",
+                "ind_low":  "" if not ind else f"{ind.low}",
             }
 
-            # Write snapshot + calc event (bounded + explicit ID = '<ts>-0')
             pipe = r_ingestor.pipeline()
             pipe.hset(snap_key, mapping=out)
             pipe.xadd(stream_out, out, id=f"{ts}-0",
                       maxlen=STREAM_MAXLEN_IND, approximate=True)
             pipe.execute()
 
-            # ── SIGNALS for Celery workers (bounded + explicit ID) ────────────
-            # ARM when indicator candle changes under a valid regime
-            if regime == "long" and cres.indicator and cres.indicator.ts != last_indicator_ts:
-                r_ingestor.xadd(stream_sig, {
-                    "v": "1", "type": "arm", "side": "long", "sym": sym, "tf": "2m",
-                    "ts": str(ts), "ind_ts": str(cres.indicator.ts),
-                    "trigger": f"{cres.trigger_long}", "stop": f"{cres.stop_long}"
-                }, id=f"{ts}-0", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True)
-                last_indicator_ts = cres.indicator.ts
-                LOG.info("[%s SIGNAL] ARM long ind_ts=%s trigger=%s stop=%s",
-                         sym, last_indicator_ts, out["trigger_long"], out["stop_long"])
+            # ── SIGNALS: FSM with direct flip safety ─────────────────────────
+            flip = last_regime in ("long", "short") and regime in ("long", "short") and regime != last_regime
 
-            if regime == "short" and cres.indicator and cres.indicator.ts != last_indicator_ts:
-                r_ingestor.xadd(stream_sig, {
-                    "v": "1", "type": "arm", "side": "short", "sym": sym, "tf": "2m",
-                    "ts": str(ts), "ind_ts": str(cres.indicator.ts),
-                    "trigger": f"{cres.trigger_short}", "stop": f"{cres.stop_short}"
-                }, id=f"{ts}-0", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True)
-                last_indicator_ts = cres.indicator.ts
-                LOG.info("[%s SIGNAL] ARM short ind_ts=%s trigger=%s stop=%s",
-                         sym, last_indicator_ts, out["trigger_short"], out["stop_short"])
+            # CASE A: neutral -> long/short : ARM
+            if last_regime == "neutral" and regime in ("long", "short"):
+                if ind is None:
+                    LOG.info("[%s SIGNAL] SKIP ARM (%s): no indicator candle yet", sym, regime)
+                else:
+                    if regime == "long":
+                        trigger, stop = _calc_long_levels(ind.high, ind.low)
+                        payload = {
+                            "v": "1", "type": "arm", "side": "long", "sym": sym, "tf": "2m",
+                            "ts": str(ts),
+                            "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
+                            "trigger": f"{trigger}", "stop": f"{stop}"
+                        }
+                    else:  # short
+                        trigger, stop = _calc_short_levels(ind.high, ind.low)
+                        payload = {
+                            "v": "1", "type": "arm", "side": "short", "sym": sym, "tf": "2m",
+                            "ts": str(ts),
+                            "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
+                            "trigger": f"{trigger}", "stop": f"{stop}"
+                        }
+                    r_ingestor.xadd(
+                        stream_sig, payload, id=f"{ts}-0",
+                        maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
+                    )
+                    armed_side = regime
+                    LOG.info("[%s SIGNAL] ARM %s ind_ts=%s trig=%s stop=%s",
+                             sym, regime, payload["ind_ts"], payload["trigger"], payload["stop"])
 
-            # DISARM if we leave the regime (before a worker fills an order)
-            if last_regime in ("long", "short") and regime != last_regime:
-                r_ingestor.xadd(stream_sig, {
-                    "v": "1", "type": "disarm", "prev_side": last_regime, "sym": sym, "tf": "2m",
-                    "ts": str(ts), "reason": f"regime:{last_regime}->{regime}"
-                }, id=f"{ts}-0", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True)
-                LOG.info("[%s SIGNAL] DISARM side=%s reason=regime-change->%s",
+            # CASE B: long/short -> neutral : DISARM
+            if last_regime in ("long", "short") and regime == "neutral":
+                r_ingestor.xadd(
+                    stream_sig,
+                    {
+                        "v": "1", "type": "disarm", "prev_side": last_regime, "sym": sym, "tf": "2m",
+                        "ts": str(ts), "reason": f"regime:{last_regime}->neutral"
+                    },
+                    id=f"{ts}-0", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
+                )
+                LOG.info("[%s SIGNAL] DISARM side=%s reason=regime-change->neutral",
+                         sym, last_regime)
+                armed_side = None
+
+            # CASE C: long <-> short (direct flip): DISARM old then ARM new
+            if flip:
+                # First DISARM the previous side
+                r_ingestor.xadd(
+                    stream_sig,
+                    {
+                        "v": "1", "type": "disarm", "prev_side": last_regime, "sym": sym, "tf": "2m",
+                        "ts": str(ts), "reason": f"regime:{last_regime}->{regime} (direct-flip)"
+                    },
+                    id=f"{ts}-0", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
+                )
+                LOG.info("[%s SIGNAL] DISARM (direct flip) side=%s -> %s",
                          sym, last_regime, regime)
-                last_indicator_ts = None
+                armed_side = None
 
+                # Then ARM the new side if we have an indicator
+                if ind is None:
+                    LOG.info("[%s SIGNAL] SKIP ARM after flip to %s: no indicator candle yet",
+                             sym, regime)
+                else:
+                    if regime == "long":
+                        trigger, stop = _calc_long_levels(ind.high, ind.low)
+                        payload = {
+                            "v": "1", "type": "arm", "side": "long", "sym": sym, "tf": "2m",
+                            "ts": str(ts),
+                            "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
+                            "trigger": f"{trigger}", "stop": f"{stop}"
+                        }
+                    else:  # short
+                        trigger, stop = _calc_short_levels(ind.high, ind.low)
+                        payload = {
+                            "v": "1", "type": "arm", "side": "short", "sym": sym, "tf": "2m",
+                            "ts": str(ts),
+                            "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
+                            "trigger": f"{trigger}", "stop": f"{stop}"
+                        }
+                    r_ingestor.xadd(
+                        stream_sig, payload, id=f"{ts}-0",
+                        maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
+                    )
+                    armed_side = regime
+                    LOG.info("[%s SIGNAL] ARM %s (after flip) ind_ts=%s trig=%s stop=%s",
+                             sym, regime, payload["ind_ts"], payload["trigger"], payload["stop"])
+
+            # Update last_regime after all signal logic for this bar
             last_regime = regime
 
             # Low-noise calc confirmation when MAs are ready
             if v20 is not None and v200 is not None:
                 LOG.info(
-                    "[%s 2m] close=%s ma20=%.2f ma200=%.2f regime=%s ind=%s trigL=%s trigS=%s",
-                    sym, close, v20, v200, regime,
-                    out['ind_ts'] or "-", out['trigger_long'] or "-", out['trigger_short'] or "-"
+                    "[%s 2m] close=%s ma20=%.2f ma200=%.2f regime=%s ind=%s",
+                    sym, close, v20, v200, regime, out['ind_ts'] or "-"
                 )
 
 async def main():

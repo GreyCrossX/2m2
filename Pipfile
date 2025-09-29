@@ -19,6 +19,9 @@ celery = "*"
 redis = "*"
 cryptography = "*"
 binance-sdk-derivatives-trading-usds-futures = "*"
+pytest = "*"
+fakeredis = "*"
+pytest-asyncio = "*"
 
 [dev-packages]
 

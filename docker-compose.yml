@@ -159,7 +159,6 @@ services:
       - ./app/services:/app/services
       - ./app/scripts:/app/scripts
 
-
   # ─────────────── Celery workers ───────────────
   worker-signals:
     build:
@@ -199,6 +198,10 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - TZ=UTC
+      # ✅ ADDED: API credentials for reconcile worker
+      - TESTNET_API_KEY=${TESTNET_API_KEY}
+      - TESTNET_API_SECRET=${TESTNET_API_SECRET}
+      - BASE_PATH=${BASE_PATH}
     working_dir: /app
     command: ["/bin/sh", "-c", "/app/scripts/run_worker_reconcile.sh"]
     depends_on:
@@ -226,6 +229,10 @@ services:
       - TZ=UTC
       - RECONCILE_SYMBOLS=${RECONCILE_SYMBOLS}
       - RECONCILE_INTERVAL_SECONDS=${RECONCILE_INTERVAL_SECONDS:-45}
+      # ✅ ADDED: API credentials for beat scheduler (if it needs them)
+      - TESTNET_API_KEY=${TESTNET_API_KEY}
+      - TESTNET_API_SECRET=${TESTNET_API_SECRET}
+      - BASE_PATH=${BASE_PATH}
     working_dir: /app
     command: ["/bin/sh", "-c", "/app/scripts/run_beat.sh"]
     depends_on:

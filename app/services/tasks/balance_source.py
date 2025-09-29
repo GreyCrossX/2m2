@@ -20,17 +20,39 @@ LOG = logging.getLogger("balance_source")
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _s(x: Optional[str]) -> str:
-    """Sanitize env strings (strip spaces & wrapping quotes)."""
+    """Sanitize env strings - more conservative approach."""
     if x is None:
         return ""
     x = x.strip()
+    # Only remove quotes if they wrap the entire string and are matching
     if len(x) >= 2 and x[0] == x[-1] and x[0] in ("'", '"'):
-        x = x[1:-1].strip()
+        return x[1:-1].strip()
     return x
 
-API_KEY   = _s(os.getenv("TESTNET_API_KEY") or os.getenv("API_KEY"))
-API_SECRET= _s(os.getenv("TESTNET_API_SECRET") or os.getenv("API_SECRET"))
-BASE_URL  = _s(os.getenv("BASE_PATH", "https://testnet.binancefuture.com"))
+def _validate_api_credentials() -> tuple[str, str, bool]:
+    """Validate API credentials and return (key, secret, is_valid)."""
+    api_key = _s(os.getenv("TESTNET_API_KEY") or os.getenv("API_KEY"))
+    api_secret = _s(os.getenv("TESTNET_API_SECRET") or os.getenv("API_SECRET"))
+    
+    # Basic validation - Binance API keys should be 64 chars, secrets should be 64 chars
+    is_valid = (
+        len(api_key) >= 32 and  # Minimum reasonable length
+        len(api_secret) >= 32 and
+        api_key.replace('-', '').replace('_', '').isalnum() and  # Should be alphanumeric (with possible dashes/underscores)
+        api_secret.replace('-', '').replace('_', '').isalnum()
+    )
+    
+    if not is_valid:
+        LOG.error(
+            "Invalid API credentials format. Key length: %d, Secret length: %d. "
+            "Expected: both should be at least 32 chars and alphanumeric",
+            len(api_key), len(api_secret)
+        )
+    
+    return api_key, api_secret, is_valid
+
+API_KEY, API_SECRET, _CREDS_VALID = _validate_api_credentials()
+BASE_URL = _s(os.getenv("BASE_PATH", "https://testnet.binancefuture.com"))
 
 # Optional: bump if clocks drift
 RECV_WINDOW_MS = int(os.getenv("BINANCE_RECV_WINDOW_MS", "60000"))
@@ -41,7 +63,8 @@ def _session_get() -> requests.Session:
     global _session
     if _session is None:
         _session = requests.Session()
-        _session.headers.update({"X-MBX-APIKEY": API_KEY})
+        if API_KEY:  # Only set header if we have a key
+            _session.headers.update({"X-MBX-APIKEY": API_KEY})
     return _session
 
 def _sign(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -68,8 +91,8 @@ def get_balances_raw(user_id: str) -> List[Dict[str, Any]]:
     GET /fapi/v3/balance  (USDS-M futures)
     Returns list of {asset, availableBalance, balance, ...} dicts.
     """
-    if not API_KEY or not API_SECRET:
-        LOG.error("Missing API KEY/SECRET in env for user %s", user_id or "<none>")
+    if not _CREDS_VALID:
+        LOG.error("Cannot fetch balances - invalid API credentials for user %s", user_id or "<none>")
         return []
 
     try:
@@ -94,6 +117,10 @@ def get_balances_raw(user_id: str) -> List[Dict[str, Any]]:
 
 def get_free_balance(user_id: str, asset: str = "USDT") -> Decimal:
     """Return available balance for asset as Decimal; Decimal('0') on error."""
+    if not _CREDS_VALID:
+        LOG.warning("Skipping balance fetch - invalid API credentials")
+        return Decimal("0")
+        
     rows = get_balances_raw(user_id)
     want = asset.upper()
     for row in rows:
