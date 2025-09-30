@@ -22,6 +22,7 @@ binance-sdk-derivatives-trading-usds-futures = "*"
 pytest = "*"
 fakeredis = "*"
 pytest-asyncio = "*"
+pytest-timeout = "*"
 
 [dev-packages]
 
