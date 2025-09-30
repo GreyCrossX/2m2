@@ -89,18 +89,24 @@ def on_arm_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     res_entry = place_entry_and_track(bot_id, plan)
     if not res_entry.get("ok"):
-        return {"ok": False, "error": res_entry.get("error", "entry_failed"), "diagnostics": plan.get("diagnostics")}
+        return {
+            "ok": False,
+            "error": "entry_failed",
+            "cause": res_entry.get("error"),
+            "diagnostics": plan.get("diagnostics"),
+    }
 
     res_br = {}
     if plan.get("preplace_brackets"):
         res_br = place_brackets_and_track(bot_id, plan)
         if not res_br.get("ok"):
-            return {
+             return {
                 "ok": False,
-                "error": res_br.get("error", "brackets_failed"),
+                "error": "brackets_failed",
+                "cause": res_br.get("error"),
                 "entry_id": res_entry.get("entry_id"),
                 "placed": res_br.get("placed", []),
-            }
+    }
 
     mark_processed(bot_id, signal_id)
 
