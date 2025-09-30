@@ -1,19 +1,9 @@
-# app/services/tasks/sizing.py
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_DOWN
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
-# If you already have these helpers, import them; otherwise inline minimal versions.
-try:
-    from .exchange_filters import round_qty, round_price
-except Exception:
-    def round_qty(qty: Decimal, step: Decimal) -> Decimal:
-        if step <= 0: return qty
-        return (qty / step).to_integral_value(rounding=ROUND_DOWN) * step
-    def round_price(px: Decimal, tick: Decimal) -> Decimal:
-        if tick <= 0: return px
-        return (px / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+from .exchange_filters import round_qty as _round_qty
 
 
 def _d(x: Any) -> Decimal:
@@ -25,26 +15,30 @@ def compute_position_size(
     trigger: Decimal,
     stop: Decimal,
     balance_free: Decimal,
-    risk_per_trade: Decimal,          # e.g. 0.005 for 0.5%
-    leverage: Decimal,                # e.g. 5
-    filters: Dict[str, Any],          # should contain stepSize/minQty/minNotional/tickSize if available
+    risk_per_trade: Decimal,          # e.g. Decimal("0.05") for 5%
+    leverage: Decimal,                # e.g. Decimal("5")
+    filters: Dict[str, Any],          # expects snake_case keys: step_size, min_qty, min_notional, tick_size (optional)
 ) -> Dict[str, Any]:
     """
     Return a sizing decision:
     {
       "ok": bool,
-      "qty": Decimal,           # rounded to stepSize
+      "qty": Decimal,           # rounded to step_size
       "distance": Decimal,      # |trigger - stop|
+      "risk_usdt": Decimal,
+      "leverage": Decimal,
+      "notional": Decimal,
+      "constraints": { ... },
       "notes": [ ... ],
-      "constraints": { ... }    # minQty/minNotional checks
     }
 
-    Simplified model:
+    Model:
       risk_usdt = balance_free * risk_per_trade
       distance  = |trigger - stop|
       qty_raw   = (risk_usdt * leverage) / distance
+      qty       = round_to_step(qty_raw)
 
-    Then apply symbol filters: stepSize/minQty/minNotional.
+    Enforce min_qty / min_notional.
     """
     trigger = _d(trigger)
     stop = _d(stop)
@@ -52,7 +46,7 @@ def compute_position_size(
     risk_per_trade = _d(risk_per_trade)
     leverage = _d(leverage)
 
-    notes = []
+    notes: list[str] = []
     distance = (trigger - stop).copy_abs()
     if distance <= 0:
         return {"ok": False, "qty": Decimal("0"), "distance": distance, "notes": ["invalid stop/trigger"]}
@@ -61,35 +55,31 @@ def compute_position_size(
     if risk_usdt <= 0:
         return {"ok": False, "qty": Decimal("0"), "distance": distance, "notes": ["no risk budget"]}
 
-    # Base qty calculation (USDT-margined futures; loss ≈ distance * qty).
-    # Including leverage here lets you scale position for a given risk budget.
     qty_raw = (risk_usdt * leverage) / distance
 
-    step = _d(filters.get("stepSize", "0.001"))
-    min_qty = _d(filters.get("minQty", "0"))
-    min_notional = _d(filters.get("minNotional", "0"))
-    tick = _d(filters.get("tickSize", "0.1"))  # only used if you later need to round prices
+    step = _d(filters.get("step_size", "0.001"))
+    min_qty = _d(filters.get("min_qty", "0"))
+    min_notional = _d(filters.get("min_notional", "0"))
 
-    qty = round_qty(qty_raw, step)
+    qty = _round_qty(qty_raw, {"step_size": step}) if step > 0 else qty_raw
 
     constraints = {
-        "stepSize": str(step),
-        "minQty": str(min_qty),
-        "minNotional": str(min_notional),
-        "tickSize": str(tick),
+        "step_size": str(step),
+        "min_qty": str(min_qty),
+        "min_notional": str(min_notional),
     }
 
-    # Enforce minQty
+    # Enforce min_qty
     if min_qty > 0 and qty < min_qty:
         qty = min_qty
 
-    # Enforce minNotional (approx with entry ~ trigger)
+    # Enforce min_notional (approx with entry ~ trigger)
     notional = qty * trigger
     if min_notional > 0 and notional < min_notional:
-        # bump qty up to meet min notional and re-round
         need = (min_notional / trigger)
-        qty = round_qty(need, step)
-        notes.append("bumped to meet minNotional")
+        qty = _round_qty(need, {"step_size": step}) if step > 0 else need
+        notes.append("bumped to meet min_notional")
+        notional = qty * trigger
 
     ok = qty > 0
     if not ok:
@@ -105,4 +95,3 @@ def compute_position_size(
         "constraints": constraints,
         "notes": notes,
     }
-

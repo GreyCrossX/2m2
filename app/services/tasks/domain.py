@@ -8,11 +8,12 @@ Produces a Plan:
   - tp_price: Decimal | None
   - diagnostics: dict
   - preplace_brackets: bool
-  - signal_id: str  <-- included for logging/idempotent COIDs
+  - signal_id: str
 """
 
 from __future__ import annotations
 
+import hashlib
 from decimal import Decimal
 from typing import Optional, TypedDict
 
@@ -42,6 +43,17 @@ class Plan(TypedDict, total=False):
     signal_id: str
 
 
+def _safe_coid(base: str, tag: str, max_len: int = 32) -> str:
+    """
+    Binance futures newClientOrderId has a small max length.
+    Keep a short tag suffix and hash the base to ensure uniqueness and fixed size.
+    """
+    tag = tag.strip().replace(" ", "")[:8]
+    h = hashlib.sha1(base.encode("utf-8")).hexdigest()  # 40 hex chars
+    coid = f"{tag}-{h}"  # e.g., "entry-<hash>"
+    return coid[:max_len]
+
+
 def build_plan(
     *,
     arm: ArmPayload,
@@ -54,16 +66,75 @@ def build_plan(
     ARM → build a STOP_MARKET entry at `trigger`.
     If preplace_brackets=True, pre-place reduceOnly SL/TP using `trigger` as provisional entry.
     """
-    sym = arm["sym"]
+    sym = arm["sym"].upper()
     side = arm["side"]
     trigger = Decimal(str(arm["trigger"]))
     stop = Decimal(str(arm["stop"]))
+
+    # Basic safety checks on bot config
+    status = bot_cfg.get("status", "active")
+    if status != "active":
+        return {
+            "ok": False,
+            "sym": sym,
+            "side": side,
+            "signal_id": arm["signal_id"],
+            "diagnostics": {"notes": ["bot not active"]},
+            "preplace_brackets": preplace_brackets,
+        }
+
+    side_mode = bot_cfg.get("side_mode", "both")
+    if side_mode == "long_only" and side != "long":
+        return {
+            "ok": False,
+            "sym": sym,
+            "side": side,
+            "signal_id": arm["signal_id"],
+            "diagnostics": {"notes": ["blocked by side_mode=long_only"]},
+            "preplace_brackets": preplace_brackets,
+        }
+    if side_mode == "short_only" and side != "short":
+        return {
+            "ok": False,
+            "sym": sym,
+            "side": side,
+            "signal_id": arm["signal_id"],
+            "diagnostics": {"notes": ["blocked by side_mode=short_only"]},
+            "preplace_brackets": preplace_brackets,
+        }
 
     filters = override_filters or get_symbol_filters(sym) or {}
     balance = get_free_balance(bot_cfg["user_id"], asset="USDT")
     risk = bot_cfg.get("risk_per_trade", Decimal("0.005"))
     lev = bot_cfg.get("leverage", Decimal("1"))
     tp_ratio = bot_cfg.get("tp_ratio", Decimal("1.5"))
+
+    plan: Plan = {
+        "ok": False,
+        "sym": sym,
+        "side": side,
+        "signal_id": arm["signal_id"],
+        "diagnostics": {
+            "filters_present": bool(filters),
+            "balance_free": str(balance),
+            "tp_ratio": str(tp_ratio),
+            "notes": [],
+        },
+        "preplace_brackets": preplace_brackets,
+    }
+
+    if balance <= 0:
+        plan["diagnostics"]["notes"].append("no free balance")
+        return plan
+    if trigger <= 0 or stop <= 0 or trigger == stop:
+        plan["diagnostics"]["notes"].append("invalid trigger/stop")
+        return plan
+    if risk <= 0:
+        plan["diagnostics"]["notes"].append("risk_per_trade <= 0")
+        return plan
+    if lev <= 0:
+        plan["diagnostics"]["notes"].append("leverage <= 0")
+        return plan
 
     sizing = compute_position_size(
         trigger=trigger,
@@ -73,21 +144,7 @@ def build_plan(
         leverage=lev,
         filters=filters,
     )
-
-    plan: Plan = {
-        "ok": False,
-        "sym": sym,
-        "side": side,
-        "signal_id": arm["signal_id"],
-        "diagnostics": {
-            "sizing": sizing,
-            "filters_present": bool(filters),
-            "balance_free": str(balance),
-            "tp_ratio": str(tp_ratio),
-            "notes": [],
-        },
-        "preplace_brackets": preplace_brackets,
-    }
+    plan["diagnostics"]["sizing"] = sizing
 
     if not sizing.get("ok"):
         plan["diagnostics"]["notes"].append("sizing failed")
@@ -99,11 +156,10 @@ def build_plan(
         plan["diagnostics"]["notes"].append(f"qty clamped to max_qty={max_qty}")
         qty = max_qty
 
-    # Idempotent client order IDs
-    coid_base = f"{bot_cfg['bot_id']}:{arm['signal_id']}"
-    entry_client_id = f"{coid_base}:entry"
-    sl_client_id = f"{coid_base}:sl"
-    tp_client_id = f"{coid_base}:tp"
+    coid_base = f"{bot_cfg['bot_id']}|{arm['signal_id']}|{sym}|{side}"
+    entry_client_id = _safe_coid(coid_base, "entry")
+    sl_client_id = _safe_coid(coid_base, "sl")
+    tp_client_id = _safe_coid(coid_base, "tp")
 
     entry = build_entry_order(
         sym=sym,

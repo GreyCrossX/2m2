@@ -5,15 +5,15 @@ Side effects at the exchange + Redis state updates.
 
 Exports:
 - place_entry_and_track(bot_id, plan) -> {ok, entry_id}
-- place_brackets_and_track(bot_id, plan) -> {ok, sl_id, tp_id}
+- place_brackets_and_track(bot_id, plan) -> {ok, sl_tp_ids:[...]} | {ok, skipped:"..."}
 - disarm(bot_id) -> {ok, cancelled:{entry:bool, brackets:int}, reason}
-- cancel_tracked_orders(bot_id) -> {ok, cancelled:int}   # utility, not DISARM semantics
+- cancel_tracked_orders(bot_id) -> {ok, cancelled:int, errors?:[...]}
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from .exchange import new_order, cancel_order, get_open_orders
 from .state import (
@@ -25,9 +25,6 @@ from .state import (
     list_tracked_orders,
 )
 
-# If you want per-user rate limiting, uncomment and use:
-# from .rate_limiter import acquire as rl_acquire
-
 
 def _to_float(v: Any) -> Any:
     return float(v) if isinstance(v, Decimal) else v
@@ -36,22 +33,21 @@ def _to_float(v: Any) -> Any:
 def _payload_to_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Map internal OrderPayload to **kwargs for exchange.new_order.
-    Ensures numeric fields are floats for the SDK.
+    Ensures numeric fields are floats and defaults working_type.
     """
     out: Dict[str, Any] = {}
     for k, v in payload.items():
         if k == "order_type":
             out["order_type"] = v
         elif k == "working_type":
-            out["working_type"] = v
+            out["working_type"] = v or "MARK_PRICE"
         elif k == "client_order_id":
             out["client_order_id"] = v
-        elif k == "stop_price":
-            out["stop_price"] = _to_float(v)
-        elif k == "quantity":
-            out["quantity"] = _to_float(v)
+        elif k in ("stop_price", "quantity", "price"):
+            out[k] = _to_float(v)
         else:
             out[k] = v
+    out.setdefault("working_type", "MARK_PRICE")
     return out
 
 
@@ -64,10 +60,6 @@ def place_entry_and_track(bot_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
 
     entry = plan["entry"]
     kwargs = _payload_to_kwargs(entry)
-
-    # Optional rate limit (uncomment if needed)
-    # if not rl_acquire(cfg["user_id"], cost=1):
-    #     return {"ok": False, "error": "rate_limited"}
 
     res = new_order(
         cfg["user_id"],
@@ -83,6 +75,11 @@ def place_entry_and_track(bot_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
         positionSide=kwargs.get("positionSide"),
         price=kwargs.get("price"),
         timeInForce=kwargs.get("timeInForce"),
+        **{k: v for k, v in kwargs.items() if k not in {
+            "symbol","side","order_type","quantity","reduce_only","stop_price",
+            "working_type","close_position","client_order_id","positionSide",
+            "price","timeInForce"
+        }},
     )
     if not res.get("ok"):
         return {"ok": False, "error": res.get("error", "entry failed")}
@@ -118,11 +115,12 @@ def place_brackets_and_track(bot_id: str, plan: Dict[str, Any]) -> Dict[str, Any
         payload = brackets.get(key)
         if not payload:
             continue
+
         kwargs = _payload_to_kwargs(payload)
 
-        # Optional rate limit
-        # if not rl_acquire(cfg["user_id"], cost=1):
-        #     return {"ok": False, "error": f"rate_limited on {key}"}
+        # Defensive: enforce reduce-only on closing brackets
+        if kwargs.get("order_type", "").upper().endswith("MARKET"):
+            kwargs.setdefault("reduce_only", True)
 
         res = new_order(
             cfg["user_id"],
@@ -138,14 +136,20 @@ def place_brackets_and_track(bot_id: str, plan: Dict[str, Any]) -> Dict[str, Any
             positionSide=kwargs.get("positionSide"),
             price=kwargs.get("price"),
             timeInForce=kwargs.get("timeInForce"),
+            **{k: v for k, v in kwargs.items() if k not in {
+                "symbol","side","order_type","quantity","reduce_only","stop_price",
+                "working_type","close_position","client_order_id","positionSide",
+                "price","timeInForce"
+            }},
         )
         if not res.get("ok"):
             return {"ok": False, "error": f"{key} failed: {res.get('error')}", "placed": placed_ids}
 
         oid = res.get("order_id")
         if oid:
-            track_open_order(bot_id, str(oid))
-            placed_ids.append(str(oid))
+            oid_str = str(oid)
+            track_open_order(bot_id, oid_str)
+            placed_ids.append(oid_str)
 
     st = read_bot_state(bot_id)
     st["bracket_ids"] = ",".join(placed_ids) if placed_ids else None
@@ -156,7 +160,7 @@ def place_brackets_and_track(bot_id: str, plan: Dict[str, Any]) -> Dict[str, Any
 
 def cancel_tracked_orders(bot_id: str) -> Dict[str, Any]:
     """
-    Utility: cancel everything we currently track (entry + brackets).
+    Cancel everything we currently track (entry + brackets).
     Prefer using disarm() for DISARM semantics.
     """
     cfg = read_bot_config(bot_id)
@@ -191,10 +195,8 @@ def cancel_tracked_orders(bot_id: str) -> Dict[str, Any]:
 
 def disarm(bot_id: str) -> Dict[str, Any]:
     """
-    DISARM semantics:
-      - If entry order hasn't filled (i.e., still OPEN), cancel the entry and any
-        pre-placed reduce-only brackets.
-      - If entry is already filled, DO NOT cancel brackets (they protect the position).
+    If entry is still OPEN, cancel entry and any OPEN brackets.
+    If entry already filled, do not cancel brackets (they protect the position).
     """
     cfg = read_bot_config(bot_id)
     if not cfg:
@@ -208,7 +210,11 @@ def disarm(bot_id: str) -> Dict[str, Any]:
     if not oo.get("ok"):
         return {"ok": False, "error": f"open orders fetch failed: {oo.get('error')}"}
 
-    open_order_ids = {str(o.get("orderId") or o.get("orderID") or "") for o in oo.get("orders", []) if o}
+    open_order_ids = {
+        str(o.get("orderId") or o.get("orderID") or "")
+        for o in oo.get("orders", [])
+        if o
+    }
 
     entry_id = (st.get("armed_entry_order_id") or "") if st else ""
     brackets_csv = (st.get("bracket_ids") or "") if st else ""

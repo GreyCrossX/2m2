@@ -25,21 +25,20 @@ def _quantize_step(value: Decimal, step: Decimal) -> Decimal:
     """
     if step <= 0:
         return value
-    # n = floor(value / step) * step
     n = (value / step).to_integral_value(rounding=ROUND_DOWN) * step
     return n
 
 
 def round_price(price: Decimal, filters: ExchangeFilters) -> Decimal:
-    tick = filters.get("tick_size", None)
-    if tick is None:
+    tick = filters.get("tick_size")
+    if not isinstance(tick, Decimal) or tick <= 0:
         return price
     return _quantize_step(price, tick)
 
 
 def round_qty(qty: Decimal, filters: ExchangeFilters) -> Decimal:
-    step = filters.get("step_size", None)
-    if step is None:
+    step = filters.get("step_size")
+    if not isinstance(step, Decimal) or step <= 0:
         return qty
     return _quantize_step(qty, step)
 
@@ -54,7 +53,7 @@ def enforce_mins(
     filters: ExchangeFilters,
 ) -> Tuple[Decimal, Decimal, list[str]]:
     """
-    Ensure min_qty and min_notional are satisfied by flooring qty if needed.
+    Ensure min_qty and min_notional are satisfied by adjusting qty upward.
     Returns (price, qty, warnings).
     """
     warnings: list[str] = []
@@ -65,16 +64,13 @@ def enforce_mins(
         warnings.append(f"qty increased to min_qty={min_qty}")
 
     min_notional = filters.get("min_notional")
-    if isinstance(min_notional, Decimal):
+    if isinstance(min_notional, Decimal) and price > 0:
         notional = price * qty
         if notional < min_notional:
-            # increase qty to meet min notional (still floor to step on caller)
             needed = (min_notional / price)
             if needed > qty:
                 qty = needed
-                warnings.append(
-                    f"qty increased to satisfy min_notional={min_notional}"
-                )
+                warnings.append(f"qty increased to satisfy min_notional={min_notional}")
 
     return price, qty, warnings
 
@@ -83,27 +79,32 @@ def apply_symbol_filters(payload: OrderPayload, filters: ExchangeFilters) -> Ord
     """
     Return a NEW payload with price-like and qty fields rounded/enforced.
 
-    - Rounds `stop_price` (if present) by tick_size
+    - Rounds `price` (for LIMIT/STOP/TP) and/or `stop_price` by tick_size
     - Rounds `quantity` by step_size
-    - Enforces min_qty / min_notional (using stop_price as a proxy for price)
+    - Enforces min_qty / min_notional using `price` if present, else `stop_price`
     """
-    out: OrderPayload = dict(payload)  # copy
+    out: OrderPayload = dict(payload)
 
     qty = out.get("quantity")
-    stop = out.get("stop_price")  # most of our orders are STOP_* or TP_*
+    price = out.get("price")
+    stop = out.get("stop_price")
 
-    if stop is not None:
-        stop = round_price(Decimal(stop), filters)
+    if isinstance(price, (int, float, Decimal)):
+        price = round_price(Decimal(str(price)), filters)
+        out["price"] = price
+
+    if isinstance(stop, (int, float, Decimal)):
+        stop = round_price(Decimal(str(stop)), filters)
         out["stop_price"] = stop
 
-    if qty is not None:
-        qty = round_qty(Decimal(qty), filters)
+    if isinstance(qty, (int, float, Decimal)):
+        qty = round_qty(Decimal(str(qty)), filters)
 
-    if stop is not None and qty is not None:
-        stop, qty, _ = enforce_mins(Decimal(stop), Decimal(qty), filters)
-        qty = round_qty(qty, filters)
+        ref_price = price if isinstance(price, Decimal) else stop if isinstance(stop, Decimal) else None
+        if isinstance(ref_price, Decimal):
+            _, qty, _ = enforce_mins(ref_price, qty, filters)
+            qty = round_qty(qty, filters)
 
-    if qty is not None:
         out["quantity"] = qty
 
     return out

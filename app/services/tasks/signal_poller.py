@@ -1,4 +1,3 @@
-# app/services/tasks/signal_poller.py
 from __future__ import annotations
 
 import time
@@ -15,7 +14,6 @@ from app.services.tasks.keys import stream_signal_by_tag, key_symbol_index
 from app.services.tasks.state import bots_for_symbol, read_bot_config
 
 LOG = logging.getLogger("poller")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
 GROUP = "calc_signals_v1"
 CONSUMER = "sig_poller_1"
@@ -31,6 +29,7 @@ def _d(x: Any) -> str:
     if isinstance(x, (bytes, bytearray)):
         return x.decode("utf-8", errors="replace")
     return "" if x is None else str(x)
+
 
 def _f(fields: Dict[Any, Any], name: str) -> str:
     """Fetch field by str or bytes key and return as str ('' if missing)."""
@@ -143,10 +142,10 @@ def _process_batch(sym: str, tf: str, stream: str, entries: List[Tuple[bytes, Di
             except Exception as e:
                 enqueue_errors += 1
                 LOG.error("[poller %s] enqueue %s failed id=%s bot=%s err=%s",
-                          sym, typ.upper(), _d(msg_id), bot_id, e)
+                          sym, (typ or "?").upper(), _d(msg_id), bot_id, e)
 
         if enqueue_errors == 0:
-            LOG.info("[poller %s] %s %s → dispatched to %d bot(s)", sym, typ.upper(), _d(msg_id), fan)
+            LOG.info("[poller %s] %s %s → dispatched to %d bot(s)", sym, (typ or "?").upper(), _d(msg_id), fan)
             r.xack(stream, GROUP, msg_id)
             delivered += 1
         else:

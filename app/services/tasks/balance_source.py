@@ -1,108 +1,95 @@
-# app/services/tasks/balance_source.py
 from __future__ import annotations
 
 import os
 import time
 import hmac
-import json
 import hashlib
 import logging
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Callable
 from urllib.parse import urlencode
 
 import requests
 
+from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
+    DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL,
+)
+
 LOG = logging.getLogger("balance_source")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Env + helpers
-# ──────────────────────────────────────────────────────────────────────────────
+ENV_KEY = "BINANCE_USDSF_API_KEY"
+ENV_SECRET = "BINANCE_USDSF_API_SECRET"
+ENV_BASE_URL = "BINANCE_USDSF_BASE_URL"
 
-def _s(x: Optional[str]) -> str:
-    """Sanitize env strings - more conservative approach."""
-    if x is None:
-        return ""
-    x = x.strip()
-    # Only remove quotes if they wrap the entire string and are matching
-    if len(x) >= 2 and x[0] == x[-1] and x[0] in ("'", '"'):
-        return x[1:-1].strip()
-    return x
-
-def _validate_api_credentials() -> tuple[str, str, bool]:
-    """Validate API credentials and return (key, secret, is_valid)."""
-    api_key = _s(os.getenv("TESTNET_API_KEY") or os.getenv("API_KEY"))
-    api_secret = _s(os.getenv("TESTNET_API_SECRET") or os.getenv("API_SECRET"))
-    
-    # Basic validation - Binance API keys should be 64 chars, secrets should be 64 chars
-    is_valid = (
-        len(api_key) >= 32 and  # Minimum reasonable length
-        len(api_secret) >= 32 and
-        api_key.replace('-', '').replace('_', '').isalnum() and  # Should be alphanumeric (with possible dashes/underscores)
-        api_secret.replace('-', '').replace('_', '').isalnum()
-    )
-    
-    if not is_valid:
-        LOG.error(
-            "Invalid API credentials format. Key length: %d, Secret length: %d. "
-            "Expected: both should be at least 32 chars and alphanumeric",
-            len(api_key), len(api_secret)
-        )
-    
-    return api_key, api_secret, is_valid
-
-API_KEY, API_SECRET, _CREDS_VALID = _validate_api_credentials()
-BASE_URL = _s(os.getenv("BASE_PATH", "https://testnet.binancefuture.com"))
-
-# Optional: bump if clocks drift
 RECV_WINDOW_MS = int(os.getenv("BINANCE_RECV_WINDOW_MS", "60000"))
 
-_session: Optional[requests.Session] = None
+_creds_lookup: Optional[Callable[[str], Optional[Tuple[str, str, Optional[str]]]]] = None
+_sessions: Dict[Tuple[str, str], requests.Session] = {}
 
-def _session_get() -> requests.Session:
-    global _session
-    if _session is None:
-        _session = requests.Session()
-        if API_KEY:  # Only set header if we have a key
-            _session.headers.update({"X-MBX-APIKEY": API_KEY})
-    return _session
 
-def _sign(params: Dict[str, Any]) -> Dict[str, Any]:
+def set_creds_lookup(fn: Callable[[str], Optional[Tuple[str, str, Optional[str]]]]) -> None:
+    """
+    Install a function that returns user-specific credentials:
+      fn(user_id) -> (api_key, api_secret, base_url_or_none) or None
+    """
+    global _creds_lookup
+    _creds_lookup = fn
+
+
+def _resolve_creds(user_id: str) -> Tuple[str, str, str]:
+    if _creds_lookup:
+        try:
+            res = _creds_lookup(user_id)
+            if res and len(res) >= 2:
+                k, s, b = (res + (None,))[:3]
+                base = (b or "").strip() or os.getenv(ENV_BASE_URL, "") or DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL
+                return (k or "", s or "", base)
+        except Exception as e:
+            LOG.error("balance creds_lookup failed for user_id=%s: %s", user_id, e)
+
+    k = os.getenv(ENV_KEY, "") or ""
+    s = os.getenv(ENV_SECRET, "") or ""
+    b = os.getenv(ENV_BASE_URL, "") or DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL
+    return (k, s, b)
+
+
+def _session_for(api_key: str, base_url: str) -> requests.Session:
+    key = (api_key, base_url)
+    sess = _sessions.get(key)
+    if sess is None:
+        sess = requests.Session()
+        if api_key:
+            sess.headers.update({"X-MBX-APIKEY": api_key})
+        _sessions[key] = sess
+    return sess
+
+
+def _sign(secret: str, params: Dict[str, Any]) -> Dict[str, Any]:
     query = urlencode(params)
-    signature = hmac.new(API_SECRET.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
+    signature = hmac.new(secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
     params["signature"] = signature
     return params
 
-def _get(path: str, params: Dict[str, Any], auth: bool = False, timeout: int = 15) -> requests.Response:
-    url = f"{BASE_URL}{path}"
+
+def _get(user_id: str, path: str, params: Dict[str, Any], auth: bool, timeout: int = 15) -> requests.Response:
+    api_key, api_secret, base_url = _resolve_creds(user_id)
+    url = f"{base_url}{path}"
     if auth:
         now = int(time.time() * 1000)
         params.setdefault("timestamp", now)
         params.setdefault("recvWindow", RECV_WINDOW_MS)
-        params = _sign(params)
-    return _session_get().get(url, params=params, timeout=timeout)
+        params = _sign(api_secret, params)
+    sess = _session_for(api_key, base_url)
+    return sess.get(url, params=params, timeout=timeout)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Public API used by handlers / domain
-# ──────────────────────────────────────────────────────────────────────────────
 
 def get_balances_raw(user_id: str) -> List[Dict[str, Any]]:
     """
     GET /fapi/v3/balance  (USDS-M futures)
     Returns list of {asset, availableBalance, balance, ...} dicts.
     """
-    if not _CREDS_VALID:
-        LOG.error("Cannot fetch balances - invalid API credentials for user %s", user_id or "<none>")
-        return []
-
     try:
-        # Ping /fapi/v1/time once in case BASE_URL is wrong; non-fatal if it fails
-        try:
-            _get("/fapi/v1/time", {}, auth=False, timeout=5)
-        except Exception as e:
-            LOG.debug("time ping failed (non-fatal): %s", e)
-
-        resp = _get("/fapi/v3/balance", {}, auth=True)
+        resp = _get(user_id, "/fapi/v3/balance", {}, auth=True)
         if resp.status_code != 200:
             LOG.error("balance HTTP %s: %s", resp.status_code, resp.text[:500])
             return []
@@ -115,19 +102,16 @@ def get_balances_raw(user_id: str) -> List[Dict[str, Any]]:
         LOG.error("get_balances_raw error for user %s: %s", user_id or "<none>", e)
         return []
 
+
 def get_free_balance(user_id: str, asset: str = "USDT") -> Decimal:
     """Return available balance for asset as Decimal; Decimal('0') on error."""
-    if not _CREDS_VALID:
-        LOG.warning("Skipping balance fetch - invalid API credentials")
-        return Decimal("0")
-        
-    rows = get_balances_raw(user_id)
-    want = asset.upper()
-    for row in rows:
-        try:
+    try:
+        rows = get_balances_raw(user_id)
+        want = asset.upper()
+        for row in rows:
             if str(row.get("asset", "")).upper() == want:
                 free = row.get("availableBalance") or row.get("balance") or "0"
                 return Decimal(str(free))
-        except Exception:
-            continue
-    return Decimal("0")
+        return Decimal("0")
+    except Exception:
+        return Decimal("0")

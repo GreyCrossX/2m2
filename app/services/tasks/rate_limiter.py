@@ -34,7 +34,16 @@ from app.services.ingestor.redis_io import r  # redis-py client
 
 LOG = logging.getLogger("rate_limiter")
 
-RL_ENABLED = os.getenv("RL_ENABLED", "1") != "0"
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    v = v.strip().lower()
+    return v not in ("0", "false", "no", "off", "")
+
+
+RL_ENABLED = _env_bool("RL_ENABLED", True)
 DEFAULT_CAPACITY = float(os.getenv("RL_DEFAULT_CAPACITY", "10"))
 DEFAULT_REFILL_RATE = float(os.getenv("RL_DEFAULT_REFILL_RATE", "5"))  # tokens/sec
 IDLE_EXPIRE_MS = int(os.getenv("RL_IDLE_EXPIRE_MS", "3600000"))        # 1h
@@ -117,10 +126,10 @@ def set_bucket_config(api_key_id: str, *, capacity: float, refill_rate: float) -
     Override capacity/refill for a specific API key.
     """
     try:
-        r.hset(_key(api_key_id), mapping={"cap": capacity, "rate": refill_rate})
-        # also seed tokens/ts if bucket didn't exist so first acquire works smoothly
-        r.hsetnx(_key(api_key_id), "tokens", capacity)
-        r.hsetnx(_key(api_key_id), "ts", 0)
+        key = _key(api_key_id)
+        r.hset(key, mapping={"cap": capacity, "rate": refill_rate})
+        r.hsetnx(key, "tokens", capacity)
+        r.hsetnx(key, "ts", 0)
     except Exception as e:
         LOG.error("set_bucket_config failed for %s: %s", api_key_id, e)
 
@@ -160,14 +169,13 @@ def acquire_with_remaining(
 
     try:
         resp = r.eval(_LUA, 1, _key(api_key_id), cap, rate, cost, IDLE_EXPIRE_MS)
-        # redis-py returns a list like [1, 9.0]
         allowed = bool(resp[0])
         remaining = float(resp[1])
         return allowed, remaining
     except Exception as e:
-        # In doubt, be permissive on testnet but log loudly.
-        LOG.warning("rate_limiter acquire fallback allow for %s due to error: %s", api_key_id, e)
-        return True, float("inf")
+        # Fail-closed on mainnet to avoid accidental rate overruns
+        LOG.error("rate_limiter acquire failed for %s: %s", api_key_id, e)
+        return False, 0.0
 
 
 def acquire(

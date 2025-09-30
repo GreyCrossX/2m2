@@ -48,10 +48,9 @@ def build_entry_order(
     if client_order_id:
         payload["client_order_id"] = client_order_id  # mapped later in exchange facade
 
-    # Optional hedge mode: passthrough key (supported by Binance futures)
     if position_side in ("LONG", "SHORT"):
         # type: ignore[typeddict-item]
-        payload["positionSide"] = position_side  # runtime-safe; typed dict is total=False
+        payload["positionSide"] = position_side  # total=False in TypedDict
 
     return apply_symbol_filters(payload, filters or {}) if filters is not None else payload
 
@@ -70,7 +69,6 @@ def build_stop_loss_order(
     """
     Reduce-only STOP_MARKET to close the position at 'stop'.
     """
-    # To close a long, we SELL; to close a short, we BUY.
     close_side = "SELL" if side == "long" else "BUY"
 
     payload: OrderPayload = {
@@ -106,10 +104,7 @@ def _tp_price_from_r_multiple(
       short: tp = entry - tp_ratio * R
     """
     distance = (avg_entry - stop).copy_abs()
-    if side == "long":
-        return avg_entry + tp_ratio * distance
-    else:
-        return avg_entry - tp_ratio * distance
+    return avg_entry + tp_ratio * distance if side == "long" else avg_entry - tp_ratio * distance
 
 
 def build_take_profit_order(
@@ -127,7 +122,7 @@ def build_take_profit_order(
 ) -> Tuple[OrderPayload, Decimal]:
     """
     Reduce-only TAKE_PROFIT_MARKET using R-multiple from avg_entry and stop.
-    Returns (payload, tp_price)
+    Returns (payload, tp_price_final)
     """
     close_side = "SELL" if side == "long" else "BUY"
     tp_price = _tp_price_from_r_multiple(
@@ -151,7 +146,6 @@ def build_take_profit_order(
         payload["positionSide"] = position_side
 
     payload = apply_symbol_filters(payload, filters or {}) if filters is not None else payload
-    # Note: tp_price might have been rounded inside payload; return what we sent:
     final_tp = payload["stop_price"] if "stop_price" in payload else tp_price
     return payload, final_tp  # type: ignore[return-value]
 

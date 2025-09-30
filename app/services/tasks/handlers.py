@@ -19,7 +19,7 @@ Notes:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 from celery import shared_task
 
@@ -31,7 +31,7 @@ from .idem import already_processed, mark_processed
 LOG = logging.getLogger("handlers")
 
 
-def _require(fields: list[str], data: Dict[str, Any]) -> tuple[bool, str | None]:
+def _require(fields: Tuple[str, ...], data: Dict[str, Any]) -> Tuple[bool, str | None]:
     for f in fields:
         if f not in data or data[f] in (None, ""):
             return False, f
@@ -48,7 +48,7 @@ def _require(fields: list[str], data: Dict[str, Any]) -> tuple[bool, str | None]
 )
 def on_arm_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Payload from poller example:
+    Payload example:
     {
       "bot_id": "...",
       "signal_id": "BTCUSDT:169...:long",
@@ -58,14 +58,14 @@ def on_arm_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
       "stop": "67650.0"
     }
     """
-    ok, missing = _require(["bot_id", "signal_id", "sym", "side", "trigger", "stop"], payload)
+    required = ("bot_id", "signal_id", "sym", "side", "trigger", "stop")
+    ok, missing = _require(required, payload)
     if not ok:
         return {"ok": False, "error": f"missing field: {missing}"}
 
     bot_id = payload["bot_id"]
     signal_id = payload["signal_id"]
 
-    # Idempotency: skip if we've already processed this signal for this bot
     if already_processed(bot_id, signal_id):
         return {"ok": True, "skipped": "duplicate", "signal_id": signal_id}
 
@@ -73,32 +73,28 @@ def on_arm_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
     if not cfg:
         return {"ok": False, "error": "bot config not found", "bot_id": bot_id}
 
-    # Build domain plan (casts Decimal internally; reads balance/filters)
     arm = {
         "bot_id": bot_id,
         "signal_id": signal_id,
         "sym": payload["sym"],
-        "side": payload["side"],       # "long" | "short"
-        "trigger": payload["trigger"], # keep as str here
+        "side": payload["side"],
+        "trigger": payload["trigger"],
         "stop": payload["stop"],
-        "tp_ratio": payload.get("tp_ratio"),  # optional override
+        "tp_ratio": payload.get("tp_ratio"),
     }
-    plan = build_plan(arm=arm, bot_cfg=cfg, preplace_brackets=True)
 
+    plan = build_plan(arm=arm, bot_cfg=cfg, preplace_brackets=True)
     if not plan.get("ok"):
         return {"ok": False, "error": "plan_not_ok", "diagnostics": plan.get("diagnostics")}
 
-    # Place entry
     res_entry = place_entry_and_track(bot_id, plan)
     if not res_entry.get("ok"):
         return {"ok": False, "error": res_entry.get("error", "entry_failed"), "diagnostics": plan.get("diagnostics")}
 
-    # Optionally pre-place reduce-only brackets (recommended without fills WS)
     res_br = {}
     if plan.get("preplace_brackets"):
         res_br = place_brackets_and_track(bot_id, plan)
         if not res_br.get("ok"):
-            # Return partial success; entry is placed already
             return {
                 "ok": False,
                 "error": res_br.get("error", "brackets_failed"),
@@ -106,10 +102,9 @@ def on_arm_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
                 "placed": res_br.get("placed", []),
             }
 
-    # Success → mark idempotent
     mark_processed(bot_id, signal_id)
 
-    out = {
+    out: Dict[str, Any] = {
         "ok": True,
         "signal_id": signal_id,
         "entry_id": res_entry.get("entry_id"),
@@ -129,7 +124,7 @@ def on_arm_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
 )
 def on_disarm_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Payload from poller example:
+    Payload example:
     {
       "bot_id": "...",
       "signal_id": "BTCUSDT:169...:long",
@@ -137,12 +132,11 @@ def on_disarm_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
       "side": "long"
     }
     """
-    ok, missing = _require(["bot_id", "signal_id", "sym", "side"], payload)
+    required = ("bot_id", "signal_id", "sym", "side")
+    ok, missing = _require(required, payload)
     if not ok:
         return {"ok": False, "error": f"missing field: {missing}"}
 
     bot_id = payload["bot_id"]
-
-    # DISARM semantics handled in actions.disarm()
     res = disarm(bot_id)
     return {"ok": True, "result": res, "signal_id": payload["signal_id"]}
