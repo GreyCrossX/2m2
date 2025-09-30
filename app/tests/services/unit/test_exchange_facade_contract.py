@@ -169,3 +169,240 @@ def test_new_order_error_passthrough(_isolate_exchange, monkeypatch):
     assert "sdk exploded" in out["error"]
 
 
+@pytest.mark.unit
+@pytest.mark.exchange
+def test_new_order_limit_with_price_and_tif_drops_nones(_isolate_exchange):
+    """
+    LIMIT orders must pass price + timeInForce and must NOT include any None params.
+    """
+    exchange, calls = _isolate_exchange
+
+    out = exchange.new_order(
+        user_id="u1",
+        symbol="ETHUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=0.5,
+        price=2500.10,
+        timeInForce="GTC",
+        # These are all None on purpose — the facade should drop them
+        stop_price=None,
+        working_type=None,
+        reduce_only=None,
+        close_position=None,
+        client_order_id="coid-LIM-1",
+        positionSide=None,
+        priceProtect=None,
+    )
+    assert out["ok"] is True
+    assert len(calls["new_order"]) >= 1
+    sent = calls["new_order"][-1]
+
+    # Required fields for LIMIT
+    assert sent["symbol"] == "ETHUSDT"
+    assert sent["side"] == "SELL"
+    assert sent["type"] == "LIMIT"
+    assert sent["quantity"] == 0.5
+    assert sent["price"] == 2500.10
+    assert sent["timeInForce"] == "GTC"
+
+    # None-valued fields should be omitted entirely
+    for k in ("stopPrice", "workingType", "reduceOnly", "closePosition",
+              "positionSide", "priceProtect"):
+        assert k not in sent
+
+
+@pytest.mark.unit
+@pytest.mark.exchange
+def test_new_order_stop_and_take_profit_limit_mapping(_isolate_exchange):
+    """
+    Non-market STOP/TP should carry stopPrice + price + timeInForce and correct type.
+    """
+    exchange, calls = _isolate_exchange
+
+    # STOP (stop-limit)
+    out1 = exchange.new_order(
+        user_id="u1",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="STOP",
+        quantity=0.01,
+        stop_price=101.50,
+        price=101.60,
+        timeInForce="GTC",
+        client_order_id="coid-STOP-LIM",
+    )
+    assert out1["ok"] is True
+    sent1 = calls["new_order"][-1]
+    assert sent1["type"] == "STOP"
+    assert sent1["stopPrice"] == 101.50
+    assert sent1["price"] == 101.60
+    assert sent1["timeInForce"] == "GTC"
+
+    # TAKE_PROFIT (tp-limit)
+    out2 = exchange.new_order(
+        user_id="u1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="TAKE_PROFIT",
+        quantity=0.02,
+        stop_price=98.40,
+        price=98.30,
+        timeInForce="GTC",
+        client_order_id="coid-TP-LIM",
+    )
+    assert out2["ok"] is True
+    sent2 = calls["new_order"][-1]
+    assert sent2["type"] == "TAKE_PROFIT"
+    assert sent2["stopPrice"] == 98.40
+    assert sent2["price"] == 98.30
+    assert sent2["timeInForce"] == "GTC"
+
+@pytest.mark.unit
+@pytest.mark.exchange
+def test_market_variants_drop_price_tif_even_if_provided(_isolate_exchange):
+    """
+    STOP_MARKET / TAKE_PROFIT_MARKET must not send price/timeInForce even if caller supplies them.
+    They *should* send stopPrice (+ workingType/priceProtect if given).
+    """
+    exchange, calls = _isolate_exchange
+
+    # STOP_MARKET
+    out1 = exchange.new_order(
+        user_id="u1",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="STOP_MARKET",
+        quantity=0.01,
+        stop_price=68000.5,
+        # Caller mistakenly supplies these – facade should drop them
+        price=68100.0,
+        timeInForce="GTC",
+        # passthroughs should remain
+        working_type="MARK_PRICE",
+        priceProtect=True,
+    )
+    assert out1["ok"] is True
+    sent1 = calls["new_order"][-1]
+    assert sent1["type"] == "STOP_MARKET"
+    assert sent1["stopPrice"] == 68000.5
+    assert sent1["workingType"] == "MARK_PRICE"
+    assert sent1["priceProtect"] is True
+    # ensure dropped
+    assert "price" not in sent1
+    assert "timeInForce" not in sent1
+
+    # TAKE_PROFIT_MARKET
+    out2 = exchange.new_order(
+        user_id="u1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="TAKE_PROFIT_MARKET",
+        quantity=0.02,
+        stop_price=67000.0,
+        price=66950.0,          # should be dropped
+        timeInForce="IOC",      # should be dropped
+        working_type="LAST_PRICE",
+    )
+    assert out2["ok"] is True
+    sent2 = calls["new_order"][-1]
+    assert sent2["type"] == "TAKE_PROFIT_MARKET"
+    assert sent2["stopPrice"] == 67000.0
+    assert sent2["workingType"] == "LAST_PRICE"
+    assert "price" not in sent2
+    assert "timeInForce" not in sent2
+
+
+@pytest.mark.unit
+@pytest.mark.exchange
+def test_cancel_by_client_order_id_maps_correctly(_isolate_exchange):
+    """
+    Cancel should map orig_client_order_id -> origClientOrderId and omit orderId.
+    """
+    exchange, calls = _isolate_exchange
+
+    res = exchange.cancel_order(
+        "u1",
+        symbol="ETHUSDT",
+        orig_client_order_id="cli-123",
+    )
+    assert res["ok"] is True
+
+    sent = calls["cancel_order"][-1]
+    assert sent["symbol"] == "ETHUSDT"
+    assert sent["origClientOrderId"] == "cli-123"
+    assert "orderId" not in sent
+
+import types
+import pytest
+
+@pytest.mark.unit
+@pytest.mark.exchange
+def test_limit_includes_price_and_tif_omits_stopprice(_isolate_exchange):
+    """
+    LIMIT orders must forward price/timeInForce and omit stopPrice.
+    """
+    exchange, calls = _isolate_exchange
+
+    out = exchange.new_order(
+        user_id="u1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=0.02,
+        price=12345.6,
+        timeInForce="GTC",
+        # No stop fields for LIMIT
+    )
+    assert out["ok"] is True
+    sent = calls["new_order"][-1]
+    assert sent["type"] == "LIMIT"
+    assert sent["symbol"] == "BTCUSDT"
+    assert sent["side"] == "SELL"
+    assert sent["quantity"] == 0.02
+    assert sent["price"] == 12345.6
+    assert sent["timeInForce"] == "GTC"
+    assert "stopPrice" not in sent
+
+
+@pytest.mark.unit
+@pytest.mark.exchange
+def test_set_creds_lookup_is_used_and_cache_cleared(_isolate_exchange, monkeypatch):
+    """
+    set_creds_lookup should feed _client_for_user with the resolved creds/base_url,
+    and clear any prior cache so subsequent calls use the new values.
+    """
+    exchange, _calls = _isolate_exchange
+
+    recorded = []
+
+    class _TinyRest:
+        def new_order(self, **kw):
+            # return shape matching our facade's extractor
+            return types.SimpleNamespace(data=lambda: {"orderId": 1, "clientOrderId": kw.get("newClientOrderId")})
+
+    def fake_client_for_user(user_id, api_key, api_secret, base_url):
+        recorded.append((user_id, api_key, api_secret, base_url))
+        return types.SimpleNamespace(rest_api=_TinyRest())
+
+    # Patch the cached factory so we can assert the creds/base_url that reach it
+    monkeypatch.setattr(exchange, "_client_for_user", fake_client_for_user)
+
+    # Install a creds lookup that returns custom creds & base url
+    exchange.set_creds_lookup(lambda uid: ("k-NEW", "s-NEW", "https://custom-base"))
+
+    # Fire an order → should go through fake_client_for_user with the new creds
+    out = exchange.new_order(
+        user_id="u-userX",
+        symbol="ETHUSDT",
+        side="BUY",
+        order_type="MARKET",
+        client_order_id="coid-xyz"
+    )
+    assert out["ok"] is True
+    assert recorded, "expected _client_for_user to be called"
+    user_id, k, s, b = recorded[-1]
+    assert user_id == "u-userX"
+    assert k == "k-NEW"
+    assert s == "s-NEW"
+    assert b == "https://custom-base"

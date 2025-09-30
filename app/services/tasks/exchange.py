@@ -89,8 +89,11 @@ def set_creds_lookup(fn: Callable[[str], Optional[Tuple[str, str, Optional[str]]
     """
     global _creds_lookup
     _creds_lookup = fn
-    # Clear cache so new hook takes effect immediately
-    _client_for_user.cache_clear()
+    # Clear cache so new hook takes effect immediately (if _client_for_user is LRU-wrapped).
+    clear = getattr(_client_for_user, "cache_clear", None)
+    if callable(clear):
+        clear()
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -221,7 +224,14 @@ def new_order(
         params.update(extra_kwargs)
         params = _drop_nones(params)
 
+        # For STOP_MARKET / TAKE_PROFIT_MARKET the API must NOT receive price/timeInForce
+        otype = (params.get("type") or "").upper()
+        if otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+            params.pop("price", None)
+            params.pop("timeInForce", None)
+
         resp = client.rest_api.new_order(**params)
+
 
         try:
             LOG.debug("new_order rate limits: %s", getattr(resp, "rate_limits", None))
