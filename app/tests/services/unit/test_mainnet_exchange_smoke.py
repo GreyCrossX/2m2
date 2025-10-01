@@ -37,3 +37,26 @@ def test_mainnet_order_rejection_is_graceful(set_env_mainnet):
     else:
         # If somehow accepted, at least the facade returns expected identifiers
         assert out.get("order_id") or out.get("client_order_id")
+
+@pytest.mark.skipif(not _have_creds(), reason="mainnet creds not set")
+def test_mainnet_open_orders_and_positions_smoke(set_env_mainnet):
+    from app.services.tasks.exchange import get_open_orders, get_positions
+    # No symbol (global)
+    oo_all = get_open_orders("u1")
+    assert isinstance(oo_all, dict) and "ok" in oo_all  # should not raise
+    pos_all = get_positions("u1")
+    assert isinstance(pos_all, dict) and "ok" in pos_all
+
+    # With a symbol (most common path our code uses)
+    sym = "BTCUSDT"
+    oo_sym = get_open_orders("u1", symbol=sym)
+    assert isinstance(oo_sym, dict) and "ok" in oo_sym
+    pos_sym = get_positions("u1", symbol=sym)
+    assert isinstance(pos_sym, dict) and "ok" in pos_sym
+
+@pytest.mark.skipif(not _have_creds(), reason="mainnet creds not set")
+def test_mainnet_cancel_nonexistent_order_is_graceful(set_env_mainnet):
+    # Should return a structured error or benign response, never raise
+    from app.services.tasks.exchange import cancel_order
+    out = cancel_order("u1", symbol="BTCUSDT", order_id=987654321)
+    assert isinstance(out, dict) and "ok" in out

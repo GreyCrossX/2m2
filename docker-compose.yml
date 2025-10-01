@@ -1,4 +1,4 @@
-# docker-compose.yml
+version: "3.9"
 
 services:
   # ─────────────── Infra ───────────────
@@ -75,6 +75,11 @@ services:
       - DB_URL=${DB_URL}
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET=${JWT_SECRET}
+      # Exchange facade envs (safe to expose; app may invoke reads)
+      - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
+      - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
+      - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
+      - DRY_RUN_MODE=${DRY_RUN_MODE}
     ports: ["8000:8000"]
     volumes:
       - ./app:/app/app
@@ -104,7 +109,8 @@ services:
       - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m}
       - INGESTOR_LOG_LEVEL=INFO
       - INGESTOR_LOG_1M=true
-      - BINANCE_MARKET=um_futures
+      - BINANCE_MARKET=${BINANCE_MARKET:-um_futures}
+      - BINANCE_WSS_BASE=${BINANCE_WSS_BASE}
     working_dir: /app
     command: ["python", "-m", "services.ingestor.main"]
     depends_on:
@@ -144,6 +150,7 @@ services:
       - PYTHONPATH=/app
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - POLLER_SYMBOLS=${POLLER_SYMBOLS:-BTCUSDT}
+      - POLLER_POLL_INTERVAL=${POLLER_POLL_INTERVAL:-1}
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
     working_dir: /app
@@ -171,9 +178,11 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - TZ=UTC
-      - TESTNET_API_KEY=${TESTNET_API_KEY}
-      - TESTNET_API_SECRET=${TESTNET_API_SECRET}
-      - BASE_PATH=${BASE_PATH}
+      # ✅ Facade creds (new names)
+      - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
+      - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
+      - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
+      - DRY_RUN_MODE=${DRY_RUN_MODE}
     working_dir: /app
     command: ["/bin/sh", "-c", "/app/scripts/run_worker_signals.sh"]
     depends_on:
@@ -198,10 +207,11 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - TZ=UTC
-      # ✅ ADDED: API credentials for reconcile worker
-      - TESTNET_API_KEY=${TESTNET_API_KEY}
-      - TESTNET_API_SECRET=${TESTNET_API_SECRET}
-      - BASE_PATH=${BASE_PATH}
+      # ✅ Facade creds (new names)
+      - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
+      - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
+      - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
+      - DRY_RUN_MODE=${DRY_RUN_MODE}
     working_dir: /app
     command: ["/bin/sh", "-c", "/app/scripts/run_worker_reconcile.sh"]
     depends_on:
@@ -229,10 +239,11 @@ services:
       - TZ=UTC
       - RECONCILE_SYMBOLS=${RECONCILE_SYMBOLS}
       - RECONCILE_INTERVAL_SECONDS=${RECONCILE_INTERVAL_SECONDS:-45}
-      # ✅ ADDED: API credentials for beat scheduler (if it needs them)
-      - TESTNET_API_KEY=${TESTNET_API_KEY}
-      - TESTNET_API_SECRET=${TESTNET_API_SECRET}
-      - BASE_PATH=${BASE_PATH}
+      # ✅ Facade creds (new names)
+      - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
+      - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
+      - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
+      - DRY_RUN_MODE=${DRY_RUN_MODE}
     working_dir: /app
     command: ["/bin/sh", "-c", "/app/scripts/run_beat.sh"]
     depends_on:
