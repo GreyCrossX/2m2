@@ -14,7 +14,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Dict, Iterable, Optional, Set, List
 
-from app.services.ingestor.redis_io import r
+from app.services.ingestor import redis_io
 from .contracts import BotConfig, BotState
 from .keys import (
     key_bot_cfg,
@@ -110,7 +110,7 @@ def _to_bot_state(d: Dict[str, str]) -> BotState:
 
 def read_bot_config(bot_id: str) -> Optional[BotConfig]:
     key = key_bot_cfg(bot_id)
-    raw = r.hgetall(key)
+    raw = redis_io.r.hgetall(key)
     if not raw:
         return None
     return _to_bot_config(_decode_hash(raw))
@@ -123,7 +123,7 @@ def write_bot_config(bot_id: str, cfg: BotConfig) -> None:
     key = key_bot_cfg(bot_id)
     to_set = _encode_hash(cfg)
     to_del = [k for k, v in cfg.items() if v is None]
-    pipe = r.pipeline(True)
+    pipe = redis_io.r.pipeline(True)
     if to_set:
         pipe.hset(key, mapping=to_set)  # type: ignore[arg-type]
     if to_del:
@@ -135,7 +135,7 @@ def write_bot_config(bot_id: str, cfg: BotConfig) -> None:
 def clear_bot_config_fields(bot_id: str, *fields: str) -> int:
     """HDEL specific config fields; returns number of fields removed."""
     if not fields: return 0
-    return int(r.hdel(key_bot_cfg(bot_id), *fields))
+    return int(redis_io.r.hdel(key_bot_cfg(bot_id), *fields))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # State CRUD
@@ -143,7 +143,7 @@ def clear_bot_config_fields(bot_id: str, *fields: str) -> int:
 
 def read_bot_state(bot_id: str) -> BotState:
     key = key_bot_state(bot_id)
-    h = r.hgetall(key)
+    h = redis_io.r.hgetall(key)
     if not h:
         return {}
     return _to_bot_state(_decode_hash(h))
@@ -156,7 +156,7 @@ def write_bot_state(bot_id: str, st: BotState) -> None:
     key = key_bot_state(bot_id)
     to_set = _encode_hash(st)
     to_del = [k for k, v in st.items() if v is None]
-    pipe = r.pipeline(True)
+    pipe = redis_io.r.pipeline(True)
     if to_set:
         pipe.hset(key, mapping=to_set)  # type: ignore[arg-type]
     if to_del:
@@ -170,40 +170,40 @@ def set_bot_state_fields(bot_id: str, **fields: Any) -> None:
     payload = {k: v for k, v in fields.items() if v is not None}
     if not payload:
         return
-    r.hset(key_bot_state(bot_id), mapping=_encode_hash(payload))  # type: ignore[arg-type]
+    redis_io.r.hset(key_bot_state(bot_id), mapping=_encode_hash(payload))  # type: ignore[arg-type]
 
 def clear_bot_state(bot_id: str, *fields: str) -> int:
     """HDEL specific state fields; returns number of fields removed."""
     if not fields:
         return 0
-    return int(r.hdel(key_bot_state(bot_id), *fields))
+    return int(redis_io.r.hdel(key_bot_state(bot_id), *fields))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Idempotency (processed signals)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def mark_signal_processed(bot_id: str, signal_id: str) -> int:
-    return r.sadd(key_bot_signals(bot_id), signal_id)
+    return redis_io.r.sadd(key_bot_signals(bot_id), signal_id)
 
 def is_signal_processed(bot_id: str, signal_id: str) -> bool:
-    return bool(r.sismember(key_bot_signals(bot_id), signal_id))
+    return bool(redis_io.r.sismember(key_bot_signals(bot_id), signal_id))
 
 def list_processed_signals(bot_id: str) -> Set[str]:
     """Get all processed signal IDs for a bot."""
-    return _decode_set(r.smembers(key_bot_signals(bot_id)))
+    return _decode_set(redis_io.r.smembers(key_bot_signals(bot_id)))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Open order tracking
 # ──────────────────────────────────────────────────────────────────────────────
 
 def track_open_order(bot_id: str, order_id: str) -> int:
-    return r.sadd(key_open_orders(bot_id), order_id)
+    return redis_io.r.sadd(key_open_orders(bot_id), order_id)
 
 def untrack_open_order(bot_id: str, order_id: str) -> int:
-    return r.srem(key_open_orders(bot_id), order_id)
+    return redis_io.r.srem(key_open_orders(bot_id), order_id)
 
 def list_tracked_orders(bot_id: str) -> List[str]:
-    members = r.smembers(key_open_orders(bot_id))
+    members = redis_io.r.smembers(key_open_orders(bot_id))
     return [_d(m) for m in members]
 
 # Back-compat aliases
@@ -218,11 +218,11 @@ def list_open_orders(bot_id: str) -> List[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def index_bot(symbol: str, bot_id: str) -> int:
-    return r.sadd(key_symbol_index(symbol), bot_id)
+    return redis_io.r.sadd(key_symbol_index(symbol), bot_id)
 
 def deindex_bot(symbol: str, bot_id: str) -> int:
-    return r.srem(key_symbol_index(symbol), bot_id)
+    return redis_io.r.srem(key_symbol_index(symbol), bot_id)
 
 def bots_for_symbol(sym: str) -> Set[str]:
-    members = r.smembers(key_symbol_index(sym)) or set()
+    members = redis_io.r.smembers(key_symbol_index(sym)) or set()
     return _decode_set(members)

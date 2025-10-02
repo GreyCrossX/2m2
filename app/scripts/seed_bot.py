@@ -110,9 +110,11 @@ def upsert_bot(session, user, cred, symbol="BTCUSDT"):
         enabled=True,
         env="testnet",
         side_whitelist="both",
+        side_mode="both",
         leverage=5,
-        use_balance_pct=True,
-        balance_pct="0.0050",  # ~0.5% free balance per trade
+        status="active",
+        risk_per_trade=Decimal("0.005"),
+        tp_ratio=Decimal("1.5"),
     )
     session.add(b)
     session.flush()

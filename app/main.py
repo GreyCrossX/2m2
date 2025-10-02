@@ -6,6 +6,7 @@ import logging
 
 from app.api.health import router as health_router
 from app.api.auth import router as auth_router
+from app.api.bots import router as bots_router
 
 
 logging.basicConfig(
@@ -59,3 +60,4 @@ app.add_middleware(
 #router
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(bots_router)
