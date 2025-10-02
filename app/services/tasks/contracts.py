@@ -89,7 +89,7 @@ class BracketPayloads(TypedDict):
 # Bot configuration & state
 
 SideMode = Literal["both", "long_only", "short_only"]
-BotStatus = Literal["active", "paused"]
+BotStatus = Literal["active", "paused", "ended"]
 
 
 class BotConfig(TypedDict, total=False):

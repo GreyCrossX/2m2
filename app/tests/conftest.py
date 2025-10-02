@@ -44,6 +44,8 @@ if "app.config" not in sys.modules:
     cfgpkg = types.ModuleType("app.config")
 
     class _Settings:
+        REDIS_URL = None
+
         def pairs_1m_list(self):
             return [("BTCUSDT", "1m")]
 
