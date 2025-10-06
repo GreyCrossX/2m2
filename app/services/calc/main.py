@@ -28,6 +28,17 @@ STREAM_RETENTION_MS_IND    = int(os.getenv("STREAM_RETENTION_MS_IND", "0"))
 STREAM_RETENTION_MS_SIGNAL = int(os.getenv("STREAM_RETENTION_MS_SIGNAL", "0"))
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _last_written_ts(stream_key: str) -> Optional[int]:
+    """Return the numeric millisecond TS (int) of the latest entry in a stream, or None."""
+    try:
+        last = r_ingestor.xrevrange(stream_key, count=1)
+        if last:
+            last_id, _ = last[0]
+            return int(last_id.split("-")[0])
+    except Exception as e:
+        LOG.warning("xrevrange(%s) failed: %s", stream_key, e)
+    return None
+
 def market_stream(sym: str) -> str:
     return st_market(sym, "2m")
 
@@ -96,9 +107,21 @@ async def consume_symbol(sym: str):
     sma200 = SMA(200)
     istate = IndicatorState(price_tick=PRICE_TICK)
 
+    # Resume watermarks (avoid XADD id <= last error)
+    last_out_ts = _last_written_ts(stream_out)
+    last_sig_ts = _last_written_ts(stream_sig)
+    if last_out_ts is not None:
+        LOG.info("[calc %s] resume: last calc ts=%s (skip <= this ts)", sym, last_out_ts)
+    if last_sig_ts is not None:
+        LOG.info("[calc %s] resume: last signal ts=%s (skip <= this ts)", sym, last_sig_ts)
+
     # ── state for signal emission ─────────────────────────────────────────────
     last_regime: str = "neutral"             # previous bar regime
     armed_side: Optional[str] = None         # "long" | "short" if armed, else None
+
+    # Per-bar sequence for signals so we can DISARM+ARM on same ts
+    current_sig_ts: Optional[int] = None
+    current_sig_seq: int = 0
 
     # launch optional time-based trimmer
     asyncio.create_task(_trim_task_sym(sym))
@@ -109,7 +132,7 @@ async def consume_symbol(sym: str):
     LOG.info("[calc %s] consuming %s → writing %s & %s (bootstrap from history)", sym, stream_in, stream_out, stream_sig)
 
     while True:
-        # Non-blocking large reads while bootstrapping; modest blocking once live
+        # Non-blocking larger reads while bootstrapping; modest blocking once live
         if live:
             items = r_ingestor.xread({stream_in: last_id}, count=200, block=2000)
         else:
@@ -138,6 +161,11 @@ async def consume_symbol(sym: str):
             except Exception as e:
                 LOG.warning("[%s] malformed fields at %s: %s", sym, msg_id, e)
                 continue
+
+            # Reset per-bar signal sequence for a new ts
+            if current_sig_ts != ts:
+                current_sig_ts = ts
+                current_sig_seq = 0
 
             v20  = sma20.update(close)
             v200 = sma200.update(close)
@@ -172,11 +200,18 @@ async def consume_symbol(sym: str):
                 "ind_low":  "" if not ind else f"{ind.low}",
             }
 
+            # Always refresh snapshot; append to calc stream only if strictly newer than last_out_ts
+            should_emit_out = (last_out_ts is None) or (ts > last_out_ts)
             pipe = r_ingestor.pipeline()
             pipe.hset(snap_key, mapping=out)
-            pipe.xadd(stream_out, out, id=f"{ts}-0",
-                      maxlen=STREAM_MAXLEN_IND, approximate=True)
+            if should_emit_out:
+                pipe.xadd(
+                    stream_out, out, id=f"{ts}-0",
+                    maxlen=STREAM_MAXLEN_IND, approximate=True
+                )
             pipe.execute()
+            if should_emit_out:
+                last_out_ts = ts  # advance watermark
 
             # ── During bootstrap, DO NOT emit signals ────────────────────────
             if not live:
@@ -185,6 +220,12 @@ async def consume_symbol(sym: str):
 
             # ── SIGNALS: FSM with direct flip safety ─────────────────────────
             flip = last_regime in ("long", "short") and regime in ("long", "short") and regime != last_regime
+
+            # Only emit signals for bars strictly newer than the last signal we wrote
+            should_emit_sig = (last_sig_ts is None) or (ts > last_sig_ts)
+            if not should_emit_sig:
+                last_regime = regime
+                continue
 
             # CASE A: neutral -> long/short : ARM
             if last_regime == "neutral" and regime in ("long", "short"):
@@ -207,24 +248,28 @@ async def consume_symbol(sym: str):
                             "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
                             "trigger": f"{trigger}", "stop": f"{stop}"
                         }
+                    current_sig_seq += 1
                     r_ingestor.xadd(
-                        stream_sig, payload, id=f"{ts}-0",
+                        stream_sig, payload, id=f"{ts}-{current_sig_seq}",
                         maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
                     )
+                    last_sig_ts = ts
                     armed_side = regime
                     LOG.info("[%s SIGNAL] ARM %s ind_ts=%s trig=%s stop=%s",
                              sym, regime, payload["ind_ts"], payload["trigger"], payload["stop"])
 
             # CASE B: long/short -> neutral : DISARM
             if last_regime in ("long", "short") and regime == "neutral":
+                current_sig_seq += 1
                 r_ingestor.xadd(
                     stream_sig,
                     {
                         "v": "1", "type": "disarm", "prev_side": last_regime, "sym": sym, "tf": "2m",
                         "ts": str(ts), "reason": f"regime:{last_regime}->neutral"
                     },
-                    id=f"{ts}-0", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
+                    id=f"{ts}-{current_sig_seq}", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
                 )
+                last_sig_ts = ts
                 LOG.info("[%s SIGNAL] DISARM side=%s reason=regime-change->neutral",
                          sym, last_regime)
                 armed_side = None
@@ -232,14 +277,16 @@ async def consume_symbol(sym: str):
             # CASE C: long <-> short (direct flip): DISARM old then ARM new
             if flip:
                 # First DISARM the previous side
+                current_sig_seq += 1
                 r_ingestor.xadd(
                     stream_sig,
                     {
                         "v": "1", "type": "disarm", "prev_side": last_regime, "sym": sym, "tf": "2m",
                         "ts": str(ts), "reason": f"regime:{last_regime}->{regime} (direct-flip)"
                     },
-                    id=f"{ts}-0", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
+                    id=f"{ts}-{current_sig_seq}", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
                 )
+                last_sig_ts = ts
                 LOG.info("[%s SIGNAL] DISARM (direct flip) side=%s -> %s",
                          sym, last_regime, regime)
                 armed_side = None
@@ -265,10 +312,12 @@ async def consume_symbol(sym: str):
                             "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
                             "trigger": f"{trigger}", "stop": f"{stop}"
                         }
+                    current_sig_seq += 1
                     r_ingestor.xadd(
-                        stream_sig, payload, id=f"{ts}-0",
+                        stream_sig, payload, id=f"{ts}-{current_sig_seq}",
                         maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
                     )
+                    last_sig_ts = ts
                     armed_side = regime
                     LOG.info("[%s SIGNAL] ARM %s (after flip) ind_ts=%s trig=%s stop=%s",
                              sym, regime, payload["ind_ts"], payload["trigger"], payload["stop"])
