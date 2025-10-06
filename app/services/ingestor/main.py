@@ -15,6 +15,7 @@ from .keys import st_market, cid_1m, cid_2m, dedupe_key
 from .normalize import normalize_closed_kline_1m
 from .aggregator import TwoMinuteAggregator, OneMinute
 from .binance_ws import listen_1m
+from .backfill import backfill_symbol 
 
 LOG = logging.getLogger("ingestor")
 
@@ -23,7 +24,12 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-# ── runtime toggles ────────────────────────────────────────────────────────────
+# ── backfill knobs ────────────────────────────────────────────────────────────
+BACKFILL_ON_START = os.getenv("BACKFILL_ON_START", "true").lower() in ("1", "true", "yes")
+BACKFILL_1M_LIMIT = int(os.getenv("BACKFILL_1M_LIMIT", "500"))
+BACKFILL_MIN_2M   = int(os.getenv("BACKFILL_MIN_2M", "150"))
+
+# ── runtime toggles ───────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("INGESTOR_LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)
 LOG_1M = (os.getenv("INGESTOR_LOG_1M", "false").lower() == "true")
@@ -35,7 +41,8 @@ STREAM_MAXLEN_2M = int(os.getenv("STREAM_MAXLEN_2M", "5000"))
 # Optional time-based retention (ms); 0 disables
 STREAM_RETENTION_MS_1M = int(os.getenv("STREAM_RETENTION_MS_1M", "0"))
 STREAM_RETENTION_MS_2M = int(os.getenv("STREAM_RETENTION_MS_2M", "0"))
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _iso(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -83,6 +90,28 @@ async def _trim_task(sym: str):
         except Exception as e:
             LOG.warning("[%s] trim error: %s", sym, e)
         await asyncio.sleep(60)  # run once a minute
+
+async def _maybe_backfill(sym: str):
+    """
+    If enabled and the 2m stream is thin, fetch recent 1m klines from Binance REST,
+    write them into 1m & 2m streams (deterministic IDs), so calc can warm up immediately.
+    """
+    if not BACKFILL_ON_START:
+        return
+
+    s2 = st_market(sym, "2m")
+    try:
+        have_2m = r.xlen(s2) or 0
+    except Exception:
+        have_2m = 0
+
+    if have_2m >= BACKFILL_MIN_2M:
+        LOG.info("[ingestor %s] skip backfill (have %d x 2m)", sym, have_2m)
+        return
+
+    LOG.info("[ingestor %s] backfill starting (have %d < min %d)", sym, have_2m, BACKFILL_MIN_2M)
+    res = await backfill_symbol(sym, min_two_min=BACKFILL_MIN_2M, one_min_limit=BACKFILL_1M_LIMIT, logger=LOG)
+    LOG.info("[ingestor %s] backfill done: %s", sym, res)
 
 async def _run_symbol(sym: str):
     LOG.info("Starting 1m listener for %s", sym)
@@ -149,6 +178,11 @@ async def main():
     if not symbols:
         raise RuntimeError("PAIRS_1M is empty or has no 1m entries")
 
+    # 1) Optional: backfill before starting WS
+    for sym in symbols:
+        await _maybe_backfill(sym)
+
+    # 2) Start WS → 1m → 2m pipeline
     tasks = [asyncio.create_task(_run_symbol(sym)) for sym in symbols]
 
     stop = asyncio.Event()

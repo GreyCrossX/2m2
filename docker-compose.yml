@@ -73,9 +73,13 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - DATABASE_URL=${DATABASE_URL}
       - DB_URL=${DB_URL}
+      # Auth/JWT
       - SECRET_KEY=${SECRET_KEY}
-      - JWT_SECRET=${JWT_SECRET}
-      # Exchange facade envs (safe to expose; app may invoke reads)
+      - ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      # Crypto for credentials
+      - CREDENTIALS_MASTER_KEY=${CREDENTIALS_MASTER_KEY}
+      # Optional: the app may call the exchange facade directly
       - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
       - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
       - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
@@ -107,10 +111,21 @@ services:
       - PYTHONPATH=/app
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m}
-      - INGESTOR_LOG_LEVEL=INFO
-      - INGESTOR_LOG_1M=true
+      # Logging
+      - INGESTOR_LOG_LEVEL=${INGESTOR_LOG_LEVEL:-INFO}
+      - INGESTOR_LOG_1M=${INGESTOR_LOG_1M:-false}
+      # Binance public market sources
       - BINANCE_MARKET=${BINANCE_MARKET:-um_futures}
       - BINANCE_WSS_BASE=${BINANCE_WSS_BASE}
+      # Backfill knobs (new)
+      - BACKFILL_ON_START=${BACKFILL_ON_START:-true}
+      - BACKFILL_1M_LIMIT=${BACKFILL_1M_LIMIT:-500}
+      - BACKFILL_MIN_2M=${BACKFILL_MIN_2M:-150}
+      # Stream caps & retention (can also come from .env)
+      - STREAM_MAXLEN_1M=${STREAM_MAXLEN_1M:-5000}
+      - STREAM_MAXLEN_2M=${STREAM_MAXLEN_2M:-5000}
+      - STREAM_RETENTION_MS_1M=${STREAM_RETENTION_MS_1M:-0}
+      - STREAM_RETENTION_MS_2M=${STREAM_RETENTION_MS_2M:-0}
     working_dir: /app
     command: ["python", "-m", "services.ingestor.main"]
     depends_on:
@@ -129,7 +144,12 @@ services:
       - PYTHONPATH=/app
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m}
-      - PRICE_TICK_DEFAULT=0.01
+      - PRICE_TICK_DEFAULT=${PRICE_TICK_DEFAULT:-0.01}
+      # Optional: calc’s own stream retention (if used there)
+      - STREAM_MAXLEN_IND=${STREAM_MAXLEN_IND:-5000}
+      - STREAM_MAXLEN_SIGNAL=${STREAM_MAXLEN_SIGNAL:-2000}
+      - STREAM_RETENTION_MS_IND=${STREAM_RETENTION_MS_IND:-0}
+      - STREAM_RETENTION_MS_SIGNAL=${STREAM_RETENTION_MS_SIGNAL:-0}
     working_dir: /app
     command: ["python", "-m", "services.calc.main"]
     depends_on:
@@ -178,11 +198,16 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - TZ=UTC
-      # ✅ Facade creds (new names)
+      # Exchange facade defaults (used if user creds missing)
       - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
       - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
       - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
-      - DRY_RUN_MODE=${DRY_RUN_MODE}
+      # Crypto to decrypt per-user creds stored in DB
+      - CREDENTIALS_MASTER_KEY=${CREDENTIALS_MASTER_KEY}
+      # Safety toggle: set to false for real trading
+      - DRY_RUN_MODE=${DRY_RUN_MODE:-true}
+      # DB (if worker looks up user creds directly)
+      - DATABASE_URL=${DATABASE_URL}
     working_dir: /app
     command: ["/bin/sh", "-c", "/app/scripts/run_worker_signals.sh"]
     depends_on:
@@ -207,11 +232,12 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - TZ=UTC
-      # ✅ Facade creds (new names)
       - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
       - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
       - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
-      - DRY_RUN_MODE=${DRY_RUN_MODE}
+      - CREDENTIALS_MASTER_KEY=${CREDENTIALS_MASTER_KEY}
+      - DRY_RUN_MODE=${DRY_RUN_MODE:-true}
+      - DATABASE_URL=${DATABASE_URL}
     working_dir: /app
     command: ["/bin/sh", "-c", "/app/scripts/run_worker_reconcile.sh"]
     depends_on:
@@ -239,11 +265,13 @@ services:
       - TZ=UTC
       - RECONCILE_SYMBOLS=${RECONCILE_SYMBOLS}
       - RECONCILE_INTERVAL_SECONDS=${RECONCILE_INTERVAL_SECONDS:-45}
-      # ✅ Facade creds (new names)
+      # Exchange + crypto in case beat triggers tasks that need them
       - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
       - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
       - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
-      - DRY_RUN_MODE=${DRY_RUN_MODE}
+      - CREDENTIALS_MASTER_KEY=${CREDENTIALS_MASTER_KEY}
+      - DRY_RUN_MODE=${DRY_RUN_MODE:-true}
+      - DATABASE_URL=${DATABASE_URL}
     working_dir: /app
     command: ["/bin/sh", "-c", "/app/scripts/run_beat.sh"]
     depends_on:

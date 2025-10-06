@@ -103,13 +103,28 @@ async def consume_symbol(sym: str):
     # launch optional time-based trimmer
     asyncio.create_task(_trim_task_sym(sym))
 
-    last_id = "$"  # follow live only; set "0-0" to backfill from history
-    LOG.info("[calc %s] consuming %s → writing %s & %s", sym, stream_in, stream_out, stream_sig)
+    # Bootstrap from history (0-0), then switch to live ($). Emit NO signals during bootstrap.
+    last_id = "0-0"
+    live = False
+    LOG.info("[calc %s] consuming %s → writing %s & %s (bootstrap from history)", sym, stream_in, stream_out, stream_sig)
 
     while True:
-        items = r_ingestor.xread({stream_in: last_id}, count=10, block=2000)
+        # Non-blocking large reads while bootstrapping; modest blocking once live
+        if live:
+            items = r_ingestor.xread({stream_in: last_id}, count=200, block=2000)
+        else:
+            items = r_ingestor.xread({stream_in: last_id}, count=1000)
+
         if not items:
-            continue
+            if not live:
+                # end of backlog → follow live now
+                live = True
+                last_id = "$"
+                LOG.info("[calc %s] bootstrap complete → switching to live", sym)
+                continue
+            else:
+                continue
+
         _, entries = items[0]
         for msg_id, fields in entries:
             last_id = msg_id
@@ -162,6 +177,11 @@ async def consume_symbol(sym: str):
             pipe.xadd(stream_out, out, id=f"{ts}-0",
                       maxlen=STREAM_MAXLEN_IND, approximate=True)
             pipe.execute()
+
+            # ── During bootstrap, DO NOT emit signals ────────────────────────
+            if not live:
+                last_regime = regime
+                continue
 
             # ── SIGNALS: FSM with direct flip safety ─────────────────────────
             flip = last_regime in ("long", "short") and regime in ("long", "short") and regime != last_regime
