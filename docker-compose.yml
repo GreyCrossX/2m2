@@ -159,6 +159,7 @@ services:
         condition: service_started
     restart: unless-stopped
     volumes:
+      - ./app:/app/app
       - ./app/services/calc:/app/services/calc
 
   # ─────────────── Signal poller (calc → Celery) ───────────────

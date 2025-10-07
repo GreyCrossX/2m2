@@ -180,6 +180,7 @@ async def main():
 
     # 1) Optional: backfill before starting WS
     for sym in symbols:
+        LOG.info("[calc] launching task for %s", sym)
         await _maybe_backfill(sym)
 
     # 2) Start WS → 1m → 2m pipeline
