@@ -143,7 +143,7 @@ services:
     environment:
       - PYTHONPATH=/app
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m}
+      - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m,ETHUSDT:1m}
       - PRICE_TICK_DEFAULT=${PRICE_TICK_DEFAULT:-0.01}
       # Optional: calc’s own stream retention (if used there)
       - STREAM_MAXLEN_IND=${STREAM_MAXLEN_IND:-5000}

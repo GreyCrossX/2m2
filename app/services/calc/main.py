@@ -334,9 +334,10 @@ async def consume_symbol(sym: str):
 
 async def main():
     pairs = settings.pairs_1m_list()
-    syms = [sym for sym, tf in pairs if tf.lower() == "1m"]
+    syms = [sym for sym, tf in pairs]  # Take all symbols regardless of timeframe
     if not syms:
         raise RuntimeError("No symbols configured")
+    LOG.info("Starting calc service for symbols: %s", syms)
     tasks = [asyncio.create_task(consume_symbol(sym)) for sym in syms]
     await asyncio.gather(*tasks)
 

@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     #redis
     REDIS_URL : str | None = None
-    PAIRS_1M: str = "BTCUSDT:1m"
+    PAIRS_1M: str = "BTCUSDT:1m,ETHUSDT:1m"
 
     def pairs_1m_list(self) -> List[Tuple[str, str]]:
         pairs: List[Tuple[str, str]] = []
