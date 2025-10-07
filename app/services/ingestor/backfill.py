@@ -19,17 +19,15 @@ LOG = logging.getLogger("ingestor.backfill")
 STREAM_MAXLEN_1M = int(os.getenv("STREAM_MAXLEN_1M", "5000"))
 STREAM_MAXLEN_2M = int(os.getenv("STREAM_MAXLEN_2M", "5000"))
 
-# Binance market -> REST base
+# ───────────────────────── helpers ─────────────────────────
+
 def _rest_base() -> str:
     market = (os.getenv("BINANCE_MARKET") or "um_futures").lower()
-    # USDⓈ-M Futures
     if market in ("um_futures", "um-futures", "futures", "usdm"):
-        return "https://fapi.binance.com"
-    # COIN-M Futures (not used here, but supported)
+        return "https://fapi.binance.com"   # USDⓈ-M Futures
     if market in ("cm_futures", "cm-futures", "coinm"):
-        return "https://dapi.binance.com"
-    # Spot fallback
-    return "https://api.binance.com"
+        return "https://dapi.binance.com"   # COIN-M (unused here)
+    return "https://api.binance.com"        # spot fallback
 
 def _build_klines_url(symbol: str, interval: str, limit: int, end_ms: int | None = None) -> str:
     base = _rest_base()
@@ -44,17 +42,33 @@ def _http_get_json(url: str, timeout: int = 15) -> Any:
     with urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
+def _last_stream_ts(stream: str) -> int | None:
+    """
+    Return the numeric ms timestamp (XADD ID prefix) of the newest entry,
+    or None if the stream is empty or on error.
+    """
+    try:
+        last = r.xrevrange(stream, count=1)
+        if last:
+            last_id, _ = last[0]
+            return int(last_id.split("-")[0])
+    except Exception as e:
+        LOG.warning("xrevrange(%s) failed: %s", stream, e)
+    return None
+
 def _xadd_with_caps(stream: str, fields: Dict[str, str], ts_ms: int, maxlen: int) -> str:
-    # Use explicit ID "<ts>-0" so time-based trims (MINID) align
+    # explicit ID "<ts>-0" so MINID trims align with our bar timestamps
     return r.xadd(stream, fields, id=f"{ts_ms}-0", maxlen=maxlen, approximate=True)
 
 def _as_row_from_kl(line: List[Any]) -> Tuple[Dict[str, str], OneMinute]:
     """
-    Convert a REST kline array to:
+    Convert a Binance kline array to:
       - 1m stream row (str->str)
       - OneMinute object for 2m aggregation
-    Shape per Binance docs:
-      [ openTime, open, high, low, close, volume, closeTime, quoteVolume, trades, takerBuyBase, takerBuyQuote, ignore ]
+
+    Kline shape:
+      [ openTime, open, high, low, close, volume,
+        closeTime, quoteVolume, trades, takerBuyBase, takerBuyQuote, ignore ]
     """
     open_time = int(line[0])
     open_ = float(line[1])
@@ -66,14 +80,13 @@ def _as_row_from_kl(line: List[Any]) -> Tuple[Dict[str, str], OneMinute]:
     trades = int(line[8])
 
     row = {
-        "ts": str(close_time),  # we treat the bar timestamp as close ms
+        "ts": str(close_time),  # we treat bar ts as close ms
         "open": f"{open_}",
         "high": f"{high}",
         "low": f"{low}",
         "close": f"{close}",
         "volume": f"{volume}",
         "trades": str(trades),
-        # color is optional for downstream; include for completeness
         "color": "green" if close >= open_ else "red",
     }
 
@@ -88,6 +101,8 @@ def _as_row_from_kl(line: List[Any]) -> Tuple[Dict[str, str], OneMinute]:
     )
     return row, one
 
+# ───────────────────────── main ─────────────────────────
+
 async def backfill_symbol(
     sym: str,
     *,
@@ -97,10 +112,10 @@ async def backfill_symbol(
 ) -> Dict[str, Any]:
     """
     Fetch recent 1m klines via REST, write them into:
-      - stream:market|{SYMBOL|1m}   (deduped, capped)
-      - stream:market|{SYMBOL|2m}   (via TwoMinuteAggregator)
+      - stream:market|{SYMBOL:1m}   (deduped, forward-only)
+      - stream:market|{SYMBOL:2m}   (via TwoMinuteAggregator, forward-only)
 
-    Returns: {"ok": True, "wrote_1m": N1, "wrote_2m": N2}
+    Returns: {"ok": True, "wrote_1m": N1, "wrote_2m": N2, "skipped_1m": K1, "skipped_2m": K2}
     """
     log = logger or LOG
     try:
@@ -108,45 +123,74 @@ async def backfill_symbol(
         end_ms = int(time.time() * 1000)
         url = _build_klines_url(sym, "1m", limit=need_1m, end_ms=end_ms)
         data = _http_get_json(url)
-
         if not isinstance(data, list) or not data:
             return {"ok": False, "error": "empty_or_bad_response"}
 
-        # Ensure ascending order (Binance returns ascending, but be safe)
+        # Ensure ascending by closeTime (Binance already does, but be explicit)
         klines: List[List[Any]] = sorted(data, key=lambda x: int(x[6]))
 
         s1 = st_market(sym, "1m")
         s2 = st_market(sym, "2m")
+
+        # Get current stream tops (important for forward-only writes)
+        last1 = _last_stream_ts(s1)
+        last2 = _last_stream_ts(s2)
+
         agg = TwoMinuteAggregator(sym)
 
         wrote_1m = 0
         wrote_2m = 0
+        skipped_1m = 0
+        skipped_2m = 0
 
         for arr in klines:
             row_1m, one = _as_row_from_kl(arr)
-            ts = int(row_1m["ts"])
+            ts1 = int(row_1m["ts"])
 
-            # 1m write (deduplicated)
-            if dedupe_once(dedupe_key(cid_1m(sym, ts))):
-                _xadd_with_caps(s1, row_1m, ts_ms=ts, maxlen=STREAM_MAXLEN_1M)
-                wrote_1m += 1
+            # ── 1m forward-only ──
+            # If the stream already has newer/equal data, skip to avoid XADD ID error.
+            if last1 is not None and ts1 <= last1:
+                skipped_1m += 1
+            else:
+                if dedupe_once(dedupe_key(cid_1m(sym, ts1))):
+                    _xadd_with_caps(s1, row_1m, ts_ms=ts1, maxlen=STREAM_MAXLEN_1M)
+                    wrote_1m += 1
+                    last1 = ts1  # advance watermark as we go (keeps loop O(1))
 
-            # Feed aggregator for 2m
+            # ── feed 2m aggregator ──
             two = agg.ingest(one)
-            if two:
-                ts2 = int(two["ts"])
-                if dedupe_once(dedupe_key(cid_2m(sym, ts2))):
-                    # include optional color for 2m row
-                    try:
-                        o = float(two["open"]); c = float(two["close"])
-                        two["color"] = "green" if c >= o else "red"
-                    except Exception:
-                        pass
-                    _xadd_with_caps(s2, two, ts_ms=ts2, maxlen=STREAM_MAXLEN_2M)
-                    wrote_2m += 1
+            if not two:
+                continue
 
-        log.info("[backfill %s] wrote %d x 1m and %d x 2m", sym, wrote_1m, wrote_2m)
-        return {"ok": True, "wrote_1m": wrote_1m, "wrote_2m": wrote_2m}
+            ts2 = int(two["ts"])
+
+            # 2m forward-only guard
+            if last2 is not None and ts2 <= last2:
+                skipped_2m += 1
+                continue
+
+            # include optional color for 2m
+            try:
+                o = float(two["open"]); c = float(two["close"])
+                two["color"] = "green" if c >= o else "red"
+            except Exception:
+                pass
+
+            if dedupe_once(dedupe_key(cid_2m(sym, ts2))):
+                _xadd_with_caps(s2, two, ts_ms=ts2, maxlen=STREAM_MAXLEN_2M)
+                wrote_2m += 1
+                last2 = ts2  # advance watermark
+
+        log.info("[backfill %s] wrote %d x 1m (+%d skipped) and %d x 2m (+%d skipped)",
+                 sym, wrote_1m, skipped_1m, wrote_2m, skipped_2m)
+
+        return {
+            "ok": True,
+            "wrote_1m": wrote_1m,
+            "wrote_2m": wrote_2m,
+            "skipped_1m": skipped_1m,
+            "skipped_2m": skipped_2m,
+        }
 
     except Exception as e:
         log.error("[backfill %s] failed: %s", sym, e)
