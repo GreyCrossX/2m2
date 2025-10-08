@@ -1,450 +1,767 @@
-# services/calc/main.py
+"""
+Trading Signal Calculator Service
+
+Processes market data streams, calculates indicators, and generates trading signals.
+Implements regime-based trading strategy with SMA crossovers.
+"""
+
 from __future__ import annotations
+
 import asyncio
 import logging
-import os
 import time
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Protocol
 
 from app.config import settings
-from services.ingestor.keys import st_market    # 2m input stream
-from services.ingestor.keys import tag as tag_tf
-from services.ingestor.redis_io import r as r_ingestor  # Redis client
+from services.ingestor.keys import st_market, tag as tag_tf
+from services.ingestor.redis_io import r as r_ingestor
 
 from .indicators import SMA
 from .strategy import Candle, IndicatorState, choose_regime
 
-# ─────────────────────────── Logging ────────────────────────────
-LOG = logging.getLogger("calc")
-logging.basicConfig(
-    level=getattr(logging, os.getenv("CALC_LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
 
-def _lv() -> bool:  # quick DEBUG check
-    return LOG.isEnabledFor(logging.DEBUG)
+# ═══════════════════════════════════════════════════════════════
+#  CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
 
-# ─────────────────────────── Settings ───────────────────────────
-PRICE_TICK = float(os.getenv("PRICE_TICK_DEFAULT", "0.01"))  # TODO: per-symbol tick later
+@dataclass(frozen=True)
+class CalcConfig:
+    """Immutable configuration for the calculator service."""
+    
+    price_tick: float
+    stream_maxlen_ind: int
+    stream_maxlen_signal: int
+    stream_retention_ms_ind: int
+    stream_retention_ms_signal: int
+    warmup_log_interval_sec: int
+    stream_ready_timeout_sec: int
+    
+    @classmethod
+    def from_env(cls) -> CalcConfig:
+        """Load configuration from environment variables."""
+        import os
+        return cls(
+            price_tick=float(os.getenv("PRICE_TICK_DEFAULT", "0.01")),
+            stream_maxlen_ind=int(os.getenv("STREAM_MAXLEN_IND", "5000")),
+            stream_maxlen_signal=int(os.getenv("STREAM_MAXLEN_SIGNAL", "2000")),
+            stream_retention_ms_ind=int(os.getenv("STREAM_RETENTION_MS_IND", "0")),
+            stream_retention_ms_signal=int(os.getenv("STREAM_RETENTION_MS_SIGNAL", "0")),
+            warmup_log_interval_sec=int(os.getenv("CALC_WARMUP_LOG_EVERY_SEC", "2")),
+            stream_ready_timeout_sec=int(os.getenv("CALC_STREAM_READY_TIMEOUT_SEC", "10")),
+        )
 
-# stream caps (length-based, recommended)
-STREAM_MAXLEN_IND    = int(os.getenv("STREAM_MAXLEN_IND", "5000"))    # calc events
-STREAM_MAXLEN_SIGNAL = int(os.getenv("STREAM_MAXLEN_SIGNAL", "2000")) # signals
 
-# optional time-based retention (ms); 0 disables
-STREAM_RETENTION_MS_IND    = int(os.getenv("STREAM_RETENTION_MS_IND", "0"))
-STREAM_RETENTION_MS_SIGNAL = int(os.getenv("STREAM_RETENTION_MS_SIGNAL", "0"))
+class Regime(str, Enum):
+    """Trading regime states."""
+    LONG = "long"
+    SHORT = "short"
+    NEUTRAL = "neutral"
 
-# throttle for warmup logs (seconds)
-WARMUP_LOG_EVERY_SEC = int(os.getenv("CALC_WARMUP_LOG_EVERY_SEC", "2"))
 
-# ─────────────────────────── Helpers ────────────────────────────
-def _last_written_ts(stream_key: str) -> Optional[int]:
-    """Return the numeric millisecond TS (int) of the latest entry in a stream, or None."""
-    try:
-        last = r_ingestor.xrevrange(stream_key, count=1)
-        if last:
-            last_id, _ = last[0]
-            return int(last_id.split("-")[0])
-    except Exception as e:
-        LOG.warning("xrevrange(%s) failed: %s", stream_key, e)
-    return None
+class SignalType(str, Enum):
+    """Signal message types."""
+    ARM = "arm"
+    DISARM = "disarm"
 
-# Normalize symbol to UPPERCASE everywhere keys are derived
-def market_stream(sym: str) -> str:
-    return st_market(sym.upper(), "2m")
 
-def indicator_stream(sym: str) -> str:
-    return f"stream:ind|{{{tag_tf(sym.upper(), '2m')}}}"
+# ═══════════════════════════════════════════════════════════════
+#  LOGGING
+# ═══════════════════════════════════════════════════════════════
 
-def signal_stream(sym: str) -> str:
-    return f"stream:signal|{{{tag_tf(sym.upper(), '2m')}}}"
+def setup_logging() -> logging.Logger:
+    """Configure and return the calculator logger."""
+    import os
+    logger = logging.getLogger("calc")
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("CALC_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+    return logger
 
-def snapshot_hash(sym: str) -> str:
-    return f"snap:ind|{{{tag_tf(sym.upper(), '2m')}}}"
 
-def to_float(s: str) -> float:
-    return float(s)
+LOG = setup_logging()
 
-async def _trim_task_sym(sym: str):
-    """Optional periodic time-based trimming using XTRIM MINID (approx)."""
-    out = indicator_stream(sym)
-    sig = signal_stream(sym)
-    if STREAM_RETENTION_MS_IND == 0 and STREAM_RETENTION_MS_SIGNAL == 0:
-        return
-    LOG.info("[calc %s] time-based trim enabled (ind=%dms, sig=%dms)",
-             sym, STREAM_RETENTION_MS_IND, STREAM_RETENTION_MS_SIGNAL)
-    while True:
-        now = int(time.time() * 1000)
+
+# ═══════════════════════════════════════════════════════════════
+#  DATA TRANSFER OBJECTS
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class StreamKeys:
+    """Redis stream and hash keys for a symbol."""
+    market_in: str
+    indicator_out: str
+    signal_out: str
+    snapshot: str
+    
+    @classmethod
+    def for_symbol(cls, symbol: str, timeframe: str = "2m") -> StreamKeys:
+        """Generate all Redis keys for a given symbol and timeframe."""
+        sym_upper = symbol.upper()
+        tag = tag_tf(sym_upper, timeframe)
+        return cls(
+            market_in=st_market(sym_upper, timeframe),
+            indicator_out=f"stream:ind|{{{tag}}}",
+            signal_out=f"stream:signal|{{{tag}}}",
+            snapshot=f"snap:ind|{{{tag}}}",
+        )
+
+
+@dataclass(frozen=True)
+class MarketData:
+    """Validated market candle data."""
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    color: str
+    
+    @classmethod
+    def from_fields(cls, fields: dict[str, str]) -> MarketData:
+        """Parse and validate Redis stream fields."""
+        return cls(
+            ts=int(fields["ts"]),
+            open=float(fields["open"]),
+            high=float(fields["high"]),
+            low=float(fields["low"]),
+            close=float(fields["close"]),
+            color=fields.get("color", "green"),
+        )
+
+
+@dataclass(frozen=True)
+class TradeLevels:
+    """Trigger and stop loss levels for a trade."""
+    trigger: float
+    stop: float
+
+
+@dataclass
+class IndicatorSnapshot:
+    """Complete indicator state for a given timestamp."""
+    symbol: str
+    timeframe: str
+    ts: int
+    market: MarketData
+    ma20: Optional[float]
+    ma200: Optional[float]
+    regime: str
+    ind_ts: Optional[int]
+    ind_high: Optional[float]
+    ind_low: Optional[float]
+    
+    def to_redis_dict(self) -> dict[str, str]:
+        """Convert to Redis hash format."""
+        return {
+            "v": "1",
+            "sym": self.symbol,
+            "tf": self.timeframe,
+            "ts": str(self.ts),
+            "close": str(self.market.close),
+            "open": str(self.market.open),
+            "high": str(self.market.high),
+            "low": str(self.market.low),
+            "color": self.market.color,
+            "ma20": "" if self.ma20 is None else str(self.ma20),
+            "ma200": "" if self.ma200 is None else str(self.ma200),
+            "regime": self.regime,
+            "ind_ts": "" if self.ind_ts is None else str(self.ind_ts),
+            "ind_high": "" if self.ind_high is None else str(self.ind_high),
+            "ind_low": "" if self.ind_low is None else str(self.ind_low),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  REPOSITORY LAYER
+# ═══════════════════════════════════════════════════════════════
+
+class RedisRepository(Protocol):
+    """Interface for Redis operations."""
+    
+    def get_last_timestamp(self, stream_key: str) -> Optional[int]: ...
+    def write_indicator(self, keys: StreamKeys, snapshot: IndicatorSnapshot, maxlen: int) -> None: ...
+    def write_signal(self, stream_key: str, payload: dict[str, str], msg_id: str, maxlen: int) -> None: ...
+    def trim_streams(self, keys: StreamKeys, retention_ms_ind: int, retention_ms_sig: int) -> None: ...
+
+
+class RedisRepositoryImpl:
+    """Redis operations implementation."""
+    
+    def __init__(self, redis_client):
+        self._redis = redis_client
+    
+    def get_last_timestamp(self, stream_key: str) -> Optional[int]:
+        """Get timestamp of the last message in a stream."""
         try:
-            if STREAM_RETENTION_MS_IND > 0:
-                r_ingestor.xtrim(out, minid=now - STREAM_RETENTION_MS_IND, approximate=True)
-            if STREAM_RETENTION_MS_SIGNAL > 0:
-                r_ingestor.xtrim(sig, minid=now - STREAM_RETENTION_MS_SIGNAL, approximate=True)
+            last = self._redis.xrevrange(stream_key, count=1)
+            if last:
+                last_id, _ = last[0]
+                return int(last_id.split("-")[0])
         except Exception as e:
-            LOG.warning("[calc %s] trim error on (%s,%s): %s", sym, out, sig, e)
-        await asyncio.sleep(60)
-
-def _fmt_none(x: Optional[float]) -> str:
-    return "" if x is None else f"{x}"
-
-def _calc_long_levels(ind_high: float, ind_low: float) -> Tuple[float, float]:
-    trigger = ind_high + PRICE_TICK
-    stop    = ind_low  - PRICE_TICK
-    return trigger, stop
-
-def _calc_short_levels(ind_high: float, ind_low: float) -> Tuple[float, float]:
-    trigger = ind_low  - PRICE_TICK
-    stop    = ind_high + PRICE_TICK
-    return trigger, stop
-
-def _fields_preview(fields: Dict[str, str]) -> str:
-    want = ("ts", "open", "high", "low", "close", "color")
-    pairs = []
-    for k in want:
-        v = fields.get(k)
-        pairs.append(f"{k}={v if v is not None else '<MISSING>'}")
-    return ", ".join(pairs)
-
-def _safe_int(s: str, default: Optional[int] = None) -> Optional[int]:
-    try:
-        return int(s)
-    except Exception:
-        return default
-
-# ───────────────────────── Core Consumer ────────────────────────
-async def consume_symbol(sym: str):
-    """
-    Consume 2m market stream for `sym`, compute SMA20/200, regime, indicator candle,
-    publish snapshot + calc event + high-level signal events for Celery workers.
-    """
-    LOG.info("[calc %s] task created", sym.upper())
-    sym = sym.upper()
-
-    # Derive keys & log them
-    try:
-        stream_in  = market_stream(sym)
-        stream_out = indicator_stream(sym)
-        stream_sig = signal_stream(sym)
-        snap_key   = snapshot_hash(sym)
-    except Exception as e:
-        LOG.exception("[calc %s] key derivation failed: %s", sym, e)
-        raise
-
-    LOG.info("[calc %s] I/O keys: IN=%s  OUT=%s  SIG=%s  SNAP=%s",
-             sym, stream_in, stream_out, stream_sig, snap_key)
-
-    # Redis probe + input stream probe
-    try:
-        r_ingestor.ping()
-        xlen  = r_ingestor.xlen(stream_in)
-        first = r_ingestor.xrange(stream_in, count=1) or []
-        last  = r_ingestor.xrevrange(stream_in, count=1) or []
-        LOG.info("[calc %s] input stream len=%s, first=%s, last=%s",
-                 sym, xlen,
-                 first and f"{first[0][0]} ts={_safe_int(first[0][1].get('ts',''))}" or "None",
-                 last and f"{last[0][0]} ts={_safe_int(last[0][1].get('ts',''))}" or "None")
-        if first:
-            LOG.debug("[calc %s] first fields: %s", sym, _fields_preview(first[0][1]))
-        if last:
-            LOG.debug("[calc %s] last  fields: %s", sym, _fields_preview(last[0][1]))
-    except Exception as e:
-        LOG.exception("[calc %s] Redis/stream probe failed: %s", sym, e)
-        # continue; the loop will retry xread with backoff
-
-    sma20 = SMA(20)
-    sma200 = SMA(200)
-    istate = IndicatorState(price_tick=PRICE_TICK)
-
-    # Resume watermarks (avoid XADD id <= last error)
-    last_out_ts = _last_written_ts(stream_out)
-    last_sig_ts = _last_written_ts(stream_sig)
-    if last_out_ts is not None:
-        LOG.info("[calc %s] resume: last calc ts=%s (skip <= this ts)", sym, last_out_ts)
-    if last_sig_ts is not None:
-        LOG.info("[calc %s] resume: last signal ts=%s (skip <= this ts)", sym, last_sig_ts)
-
-    last_regime: str = "neutral"
-    armed_side: Optional[str] = None  # retained for future policies
-
-    # Per-bar sequence for signals so we can DISARM+ARM on same ts
-    current_sig_ts: Optional[int] = None
-    current_sig_seq: int = 0
-
-    # Optional trimmer
-    asyncio.create_task(_trim_task_sym(sym))
-
-    # Bootstrap from history (0-0), then switch to live ($).
-    last_id = "0-0"
-    live = False
-    LOG.info("[calc %s] consuming %s → writing %s & %s (bootstrap from history)",
-             sym, stream_in, stream_out, stream_sig)
-
-    last_warmup_log = 0.0
-
-    while True:
-        try:
-            if live:
-                items = r_ingestor.xread({stream_in: last_id}, count=200, block=2000)
-            else:
-                items = r_ingestor.xread({stream_in: last_id}, count=1000)
-        except Exception as e:
-            LOG.error("[calc %s] xread error on %s (last_id=%s): %s", sym, stream_in, last_id, e)
-            await asyncio.sleep(0.5)
-            continue
-
-        if not items:
-            if not live:
-                live = True
-                last_id = "$"
-                LOG.info("[calc %s] bootstrap complete → switching to live", sym)
-            # else: idle while live
-            continue
-
-        stream_name, entries = items[0]
-        if stream_name != stream_in:
-            LOG.warning("[calc %s] xread returned unexpected stream %s (expected %s)",
-                        sym, stream_name, stream_in)
-
-        for msg_id, fields in entries:
-            last_id = msg_id
-            try:
-                ts    = int(fields["ts"])
-                close = to_float(fields["close"])
-                open_ = to_float(fields["open"])
-                high  = to_float(fields["high"])
-                low   = to_float(fields["low"])
-                color = fields.get("color", "green")
-            except Exception as e:
-                LOG.warning("[%s] malformed fields at %s: %s. fields_preview={%s}",
-                            sym, msg_id, e, _fields_preview(fields))
-                continue
-
-            # Reset per-bar signal sequence for a new ts
-            if current_sig_ts != ts:
-                current_sig_ts = ts
-                current_sig_seq = 0
-
-            v20  = sma20.update(close)
-            v200 = sma200.update(close)
-
-            # Throttled warmup logs
-            if v20 is None or v200 is None:
-                now = time.time()
-                if now - last_warmup_log >= WARMUP_LOG_EVERY_SEC:
-                    rem20  = max(0, 20  - sma20.count)
-                    rem200 = max(0, 200 - sma200.count)
-                    LOG.info("[%s 2m] close=%s warmup: ma20 in %d bars, ma200 in %d bars",
-                             sym, close, rem20, rem200)
-                    last_warmup_log = now
-
-            regime = choose_regime(close, v20, v200)
-
-            # Indicator candle update
-            cres = istate.update(
-                Candle(ts=ts, open=open_, high=high, low=low, close=close, color=color),
-                regime
+            LOG.warning("Failed to get last timestamp from %s: %s", stream_key, e)
+        return None
+    
+    def write_indicator(
+        self,
+        keys: StreamKeys,
+        snapshot: IndicatorSnapshot,
+        maxlen: int,
+    ) -> None:
+        """Write indicator data to snapshot hash and stream."""
+        data = snapshot.to_redis_dict()
+        pipe = self._redis.pipeline()
+        pipe.hset(keys.snapshot, mapping=data)
+        pipe.xadd(
+            keys.indicator_out,
+            data,
+            id=f"{snapshot.ts}-0",
+            maxlen=maxlen,
+            approximate=True,
+        )
+        pipe.execute()
+    
+    def write_signal(
+        self,
+        stream_key: str,
+        payload: dict[str, str],
+        msg_id: str,
+        maxlen: int,
+    ) -> None:
+        """Write a signal message to the signal stream."""
+        self._redis.xadd(
+            stream_key,
+            payload,
+            id=msg_id,
+            maxlen=maxlen,
+            approximate=True,
+        )
+    
+    def trim_streams(
+        self,
+        keys: StreamKeys,
+        retention_ms_ind: int,
+        retention_ms_sig: int,
+    ) -> None:
+        """Trim streams based on time-based retention."""
+        now_ms = int(time.time() * 1000)
+        if retention_ms_ind > 0:
+            self._redis.xtrim(
+                keys.indicator_out,
+                minid=now_ms - retention_ms_ind,
+                approximate=True,
             )
-            ind = cres.indicator  # Candle | None
+        if retention_ms_sig > 0:
+            self._redis.xtrim(
+                keys.signal_out,
+                minid=now_ms - retention_ms_sig,
+                approximate=True,
+            )
 
-            # ── publish calc snapshot/event ───────────────────────────────────
-            out: Dict[str, str] = {
-                "v": "1",
-                "sym": sym, "tf": "2m",
-                "ts": str(ts),
-                "close": str(close), "open": str(open_), "high": str(high), "low": str(low), "color": color,
-                "ma20":  _fmt_none(v20),
-                "ma200": _fmt_none(v200),
-                "regime": regime,
-                "ind_ts":   "" if not ind else str(ind.ts),
-                "ind_high": "" if not ind else f"{ind.high}",
-                "ind_low":  "" if not ind else f"{ind.low}",
-            }
 
-            should_emit_out = (last_out_ts is None) or (ts > last_out_ts)
-            pipe = r_ingestor.pipeline()
+# ═══════════════════════════════════════════════════════════════
+#  BUSINESS LOGIC
+# ═══════════════════════════════════════════════════════════════
+
+class TradeLevelCalculator:
+    """Calculate trigger and stop levels based on indicator candle."""
+    
+    def __init__(self, price_tick: float):
+        self._tick = price_tick
+    
+    def calculate_long(self, ind_high: float, ind_low: float) -> TradeLevels:
+        """Calculate levels for long entry."""
+        return TradeLevels(
+            trigger=ind_high + self._tick,
+            stop=ind_low - self._tick,
+        )
+    
+    def calculate_short(self, ind_high: float, ind_low: float) -> TradeLevels:
+        """Calculate levels for short entry."""
+        return TradeLevels(
+            trigger=ind_low - self._tick,
+            stop=ind_high + self._tick,
+        )
+
+
+class SignalGenerator:
+    """Generate trading signals based on regime changes."""
+    
+    def __init__(self, symbol: str, timeframe: str, level_calc: TradeLevelCalculator):
+        self._symbol = symbol
+        self._timeframe = timeframe
+        self._level_calc = level_calc
+        self._last_regime = Regime.NEUTRAL
+        self._armed_side: Optional[str] = None
+    
+    def process(
+        self,
+        ts: int,
+        regime: str,
+        indicator_candle: Optional[Candle],
+    ) -> list[dict[str, str]]:
+        """
+        Process regime change and return signal payloads to emit.
+        
+        Returns a list of signal dictionaries in the order they should be emitted.
+        """
+        signals = []
+        current = Regime(regime) if regime in {r.value for r in Regime} else Regime.NEUTRAL
+        
+        # Check for regime flip (long <-> short)
+        is_flip = (
+            self._last_regime in (Regime.LONG, Regime.SHORT)
+            and current in (Regime.LONG, Regime.SHORT)
+            and current != self._last_regime
+        )
+        
+        # CASE 1: Neutral → Armed (Long/Short)
+        if self._last_regime == Regime.NEUTRAL and current in (Regime.LONG, Regime.SHORT):
+            arm_signal = self._create_arm_signal(ts, current, indicator_candle)
+            if arm_signal:
+                signals.append(arm_signal)
+                self._armed_side = current.value
+        
+        # CASE 2: Armed → Neutral
+        elif self._last_regime in (Regime.LONG, Regime.SHORT) and current == Regime.NEUTRAL:
+            signals.append(self._create_disarm_signal(
+                ts,
+                self._last_regime.value,
+                f"regime:{self._last_regime.value}->neutral",
+            ))
+            self._armed_side = None
+        
+        # CASE 3: Direct Flip (Long → Short or Short → Long)
+        elif is_flip:
+            # First disarm old side
+            signals.append(self._create_disarm_signal(
+                ts,
+                self._last_regime.value,
+                f"regime:{self._last_regime.value}->{current.value} (direct-flip)",
+            ))
+            self._armed_side = None
+            
+            # Then arm new side
+            arm_signal = self._create_arm_signal(ts, current, indicator_candle)
+            if arm_signal:
+                signals.append(arm_signal)
+                self._armed_side = current.value
+        
+        self._last_regime = current
+        return signals
+    
+    def _create_arm_signal(
+        self,
+        ts: int,
+        regime: Regime,
+        indicator_candle: Optional[Candle],
+    ) -> Optional[dict[str, str]]:
+        """Create ARM signal payload."""
+        if indicator_candle is None:
+            LOG.info(
+                "[%s SIGNAL] SKIP ARM (%s): no indicator candle yet (ts=%s)",
+                self._symbol, regime.value, ts
+            )
+            return None
+        
+        levels = (
+            self._level_calc.calculate_long(indicator_candle.high, indicator_candle.low)
+            if regime == Regime.LONG
+            else self._level_calc.calculate_short(indicator_candle.high, indicator_candle.low)
+        )
+        
+        return {
+            "v": "1",
+            "type": SignalType.ARM.value,
+            "side": regime.value,
+            "sym": self._symbol,
+            "tf": self._timeframe,
+            "ts": str(ts),
+            "ind_ts": str(indicator_candle.ts),
+            "ind_high": str(indicator_candle.high),
+            "ind_low": str(indicator_candle.low),
+            "trigger": str(levels.trigger),
+            "stop": str(levels.stop),
+        }
+    
+    def _create_disarm_signal(self, ts: int, prev_side: str, reason: str) -> dict[str, str]:
+        """Create DISARM signal payload."""
+        return {
+            "v": "1",
+            "type": SignalType.DISARM.value,
+            "prev_side": prev_side,
+            "sym": self._symbol,
+            "tf": self._timeframe,
+            "ts": str(ts),
+            "reason": reason,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  STREAM PROCESSOR
+# ═══════════════════════════════════════════════════════════════
+
+class StreamProcessor:
+    """Main processor for market data streams."""
+    
+    def __init__(
+        self,
+        symbol: str,
+        config: CalcConfig,
+        repository: RedisRepository,
+    ):
+        self._symbol = symbol.upper().strip()
+        self._config = config
+        self._repo = repository
+        self._keys = StreamKeys.for_symbol(self._symbol)
+        
+        # Indicators
+        self._sma20 = SMA(20)
+        self._sma200 = SMA(200)
+        self._indicator_state = IndicatorState(price_tick=config.price_tick)
+        
+        # Signal generation
+        self._signal_gen = SignalGenerator(
+            self._symbol,
+            "2m",
+            TradeLevelCalculator(config.price_tick),
+        )
+        
+        # State tracking
+        self._last_out_ts: Optional[int] = None
+        self._last_sig_ts: Optional[int] = None
+        self._current_sig_ts: Optional[int] = None
+        self._current_sig_seq: int = 0
+        self._last_warmup_log: float = 0.0
+    
+    async def run(self) -> None:
+        """Main processing loop."""
+        LOG.info("[calc %s] Starting stream processor", self._symbol)
+        
+        # Wait for input stream to be ready
+        await self._wait_for_stream()
+        
+        # Resume from last processed timestamps
+        self._initialize_resume_state()
+        
+        # Start background trim task
+        asyncio.create_task(self._trim_task())
+        
+        # Process stream
+        await self._consume_stream()
+    
+    async def _wait_for_stream(self) -> None:
+        """Wait for the input stream to have data."""
+        deadline = time.time() + self._config.stream_ready_timeout_sec
+        last_log = 0.0
+        
+        while True:
             try:
-                pipe.hset(snap_key, mapping=out)
-                if should_emit_out:
-                    pipe.xadd(
-                        stream_out, out, id=f"{ts}-0",
-                        maxlen=STREAM_MAXLEN_IND, approximate=True
+                xlen = r_ingestor.xlen(self._keys.market_in)
+                if xlen > 0:
+                    LOG.info("[calc %s] Input stream ready (len=%d)", self._symbol, xlen)
+                    return
+                
+                now = time.time()
+                if now - last_log >= 2.0:
+                    LOG.info("[calc %s] Waiting for input stream data…", self._symbol)
+                    last_log = now
+                
+                if now >= deadline:
+                    LOG.warning(
+                        "[calc %s] Input stream still empty after timeout",
+                        self._symbol
                     )
-                pipe.execute()
+                    return
             except Exception as e:
-                LOG.error("[calc %s] snapshot/xadd error (out=%s, ts=%s): %s",
-                          sym, stream_out, ts, e)
-            else:
-                if should_emit_out:
-                    last_out_ts = ts  # advance watermark
-
-            # ── During bootstrap, no signals ─────────────────────────────────
-            if not live:
-                last_regime = regime
+                LOG.warning("[calc %s] Stream probe error: %s", self._symbol, e)
+                if time.time() >= deadline:
+                    return
+            
+            await asyncio.sleep(0.5)
+    
+    def _initialize_resume_state(self) -> None:
+        """Load last processed timestamps for resume capability."""
+        self._last_out_ts = self._repo.get_last_timestamp(self._keys.indicator_out)
+        self._last_sig_ts = self._repo.get_last_timestamp(self._keys.signal_out)
+        
+        if self._last_out_ts:
+            LOG.info("[calc %s] Resume from indicator ts=%s", self._symbol, self._last_out_ts)
+        if self._last_sig_ts:
+            LOG.info("[calc %s] Resume from signal ts=%s", self._symbol, self._last_sig_ts)
+    
+    async def _trim_task(self) -> None:
+        """Background task to trim streams based on retention policy."""
+        if (
+            self._config.stream_retention_ms_ind == 0
+            and self._config.stream_retention_ms_signal == 0
+        ):
+            return
+        
+        LOG.info(
+            "[calc %s] Time-based trim enabled (ind=%dms, sig=%dms)",
+            self._symbol,
+            self._config.stream_retention_ms_ind,
+            self._config.stream_retention_ms_signal,
+        )
+        
+        while True:
+            try:
+                self._repo.trim_streams(
+                    self._keys,
+                    self._config.stream_retention_ms_ind,
+                    self._config.stream_retention_ms_signal,
+                )
+            except Exception as e:
+                LOG.warning("[calc %s] Trim error: %s", self._symbol, e)
+            
+            await asyncio.sleep(60)
+    
+    async def _consume_stream(self) -> None:
+        """Consume and process market data stream."""
+        last_id = "0-0"
+        is_live = False
+        
+        LOG.info(
+            "[calc %s] Consuming %s → %s & %s",
+            self._symbol,
+            self._keys.market_in,
+            self._keys.indicator_out,
+            self._keys.signal_out,
+        )
+        
+        while True:
+            try:
+                items = r_ingestor.xread(
+                    {self._keys.market_in: last_id},
+                    count=(200 if is_live else 1000),
+                    block=(2000 if is_live else None),
+                )
+            except Exception as e:
+                LOG.error("[calc %s] xread error: %s", self._symbol, e)
+                await asyncio.sleep(0.5)
                 continue
-
-            # ── SIGNALS: FSM with direct flip safety ─────────────────────────
-            flip = last_regime in ("long", "short") and regime in ("long", "short") and regime != last_regime
-
-            # Only emit signals for bars strictly newer than the last signal we wrote
-            should_emit_sig = (last_sig_ts is None) or (ts > last_sig_ts)
-            if not should_emit_sig:
-                if _lv():
-                    LOG.debug("[%s SIGNAL] skip emit @%s (ts<=last_sig_ts=%s)", sym, ts, last_sig_ts)
-                last_regime = regime
+            
+            if not items:
+                if not is_live:
+                    is_live = True
+                    last_id = "$"
+                    LOG.info("[calc %s] Bootstrap complete → live mode", self._symbol)
                 continue
-
-            # CASE A: neutral -> long/short : ARM
-            if last_regime == "neutral" and regime in ("long", "short"):
-                if ind is None:
-                    LOG.info("[%s SIGNAL] SKIP ARM (%s): no indicator candle yet (ts=%s)",
-                             sym, regime, ts)
-                else:
-                    if regime == "long":
-                        trigger, stop = _calc_long_levels(ind.high, ind.low)
-                        payload = {
-                            "v": "1", "type": "arm", "side": "long", "sym": sym, "tf": "2m",
-                            "ts": str(ts),
-                            "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
-                            "trigger": f"{trigger}", "stop": f"{stop}"
-                        }
-                    else:
-                        trigger, stop = _calc_short_levels(ind.high, ind.low)
-                        payload = {
-                            "v": "1", "type": "arm", "side": "short", "sym": sym, "tf": "2m",
-                            "ts": str(ts),
-                            "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
-                            "trigger": f"{trigger}", "stop": f"{stop}"
-                        }
-                    current_sig_seq += 1
-                    try:
-                        r_ingestor.xadd(
-                            stream_sig, payload, id=f"{ts}-{current_sig_seq}",
-                            maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
-                        )
-                    except Exception as e:
-                        LOG.error("[%s SIGNAL] ARM write failed (sig=%s ts=%s): %s",
-                                  sym, stream_sig, ts, e)
-                    else:
-                        last_sig_ts = ts
-                        armed_side = regime
-                        LOG.info("[%s SIGNAL] ARM %s ind_ts=%s trig=%s stop=%s",
-                                 sym, regime, payload["ind_ts"], payload["trigger"], payload["stop"])
-
-            # CASE B: long/short -> neutral : DISARM
-            if last_regime in ("long", "short") and regime == "neutral":
-                current_sig_seq += 1
-                payload = {
-                    "v": "1", "type": "disarm", "prev_side": last_regime, "sym": sym, "tf": "2m",
-                    "ts": str(ts), "reason": f"regime:{last_regime}->neutral"
-                }
-                try:
-                    r_ingestor.xadd(
-                        stream_sig, payload,
-                        id=f"{ts}-{current_sig_seq}", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
-                    )
-                except Exception as e:
-                    LOG.error("[%s SIGNAL] DISARM write failed (sig=%s ts=%s): %s",
-                              sym, stream_sig, ts, e)
-                else:
-                    last_sig_ts = ts
-                    LOG.info("[%s SIGNAL] DISARM side=%s reason=regime-change->neutral",
-                             sym, last_regime)
-                    armed_side = None
-
-            # CASE C: long <-> short : DISARM old then ARM new
-            if flip:
-                # DISARM old
-                current_sig_seq += 1
-                payload_d = {
-                    "v": "1", "type": "disarm", "prev_side": last_regime, "sym": sym, "tf": "2m",
-                    "ts": str(ts), "reason": f"regime:{last_regime}->{regime} (direct-flip)"
-                }
-                try:
-                    r_ingestor.xadd(
-                        stream_sig, payload_d,
-                        id=f"{ts}-{current_sig_seq}", maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
-                    )
-                except Exception as e:
-                    LOG.error("[%s SIGNAL] DISARM (flip) write failed (sig=%s ts=%s): %s",
-                              sym, stream_sig, ts, e)
-                else:
-                    last_sig_ts = ts
-                    LOG.info("[%s SIGNAL] DISARM (direct flip) side=%s -> %s",
-                             sym, last_regime, regime)
-                    armed_side = None
-
-                # ARM new
-                if ind is None:
-                    LOG.info("[%s SIGNAL] SKIP ARM after flip to %s: no indicator candle yet (ts=%s)",
-                             sym, regime, ts)
-                else:
-                    if regime == "long":
-                        trigger, stop = _calc_long_levels(ind.high, ind.low)
-                        payload_a = {
-                            "v": "1", "type": "arm", "side": "long", "sym": sym, "tf": "2m",
-                            "ts": str(ts),
-                            "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
-                            "trigger": f"{trigger}", "stop": f"{stop}"
-                        }
-                    else:
-                        trigger, stop = _calc_short_levels(ind.high, ind.low)
-                        payload_a = {
-                            "v": "1", "type": "arm", "side": "short", "sym": sym, "tf": "2m",
-                            "ts": str(ts),
-                            "ind_ts": str(ind.ts), "ind_high": f"{ind.high}", "ind_low": f"{ind.low}",
-                            "trigger": f"{trigger}", "stop": f"{stop}"
-                        }
-                    current_sig_seq += 1
-                    try:
-                        r_ingestor.xadd(
-                            stream_sig, payload_a, id=f"{ts}-{current_sig_seq}",
-                            maxlen=STREAM_MAXLEN_SIGNAL, approximate=True
-                        )
-                    except Exception as e:
-                        LOG.error("[%s SIGNAL] ARM (after flip) write failed (sig=%s ts=%s): %s",
-                                  sym, stream_sig, ts, e)
-                    else:
-                        last_sig_ts = ts
-                        armed_side = regime
-                        LOG.info("[%s SIGNAL] ARM %s (after flip) ind_ts=%s trig=%s stop=%s",
-                                 sym, regime, payload_a["ind_ts"], payload_a["trigger"], payload_a["stop"])
-
-            # Low-noise calc confirmation when MAs are ready
-            if v20 is not None and v200 is not None and _lv():
+            
+            _, entries = items[0]
+            
+            for msg_id, fields in entries:
+                last_id = msg_id
+                self._process_message(fields, is_live)
+    
+    def _process_message(self, fields: dict[str, str], is_live: bool) -> None:
+        """Process a single market data message."""
+        try:
+            market = MarketData.from_fields(fields)
+        except (KeyError, ValueError) as e:
+            LOG.warning("[%s] Malformed fields: %s", self._symbol, e)
+            return
+        
+        # Reset signal sequence counter for new timestamp
+        if self._current_sig_ts != market.ts:
+            self._current_sig_ts = market.ts
+            self._current_sig_seq = 0
+        
+        # Update indicators
+        ma20 = self._sma20.update(market.close)
+        ma200 = self._sma200.update(market.close)
+        
+        # Log warmup progress
+        if ma20 is None or ma200 is None:
+            self._log_warmup_progress(market.close)
+        
+        # Calculate regime
+        regime = choose_regime(market.close, ma20, ma200)
+        
+        # Update indicator state
+        candle = Candle(
+            ts=market.ts,
+            open=market.open,
+            high=market.high,
+            low=market.low,
+            close=market.close,
+            color=market.color,
+        )
+        calc_result = self._indicator_state.update(candle, regime)
+        
+        # Create snapshot
+        snapshot = IndicatorSnapshot(
+            symbol=self._symbol,
+            timeframe="2m",
+            ts=market.ts,
+            market=market,
+            ma20=ma20,
+            ma200=ma200,
+            regime=regime,
+            ind_ts=calc_result.indicator.ts if calc_result.indicator else None,
+            ind_high=calc_result.indicator.high if calc_result.indicator else None,
+            ind_low=calc_result.indicator.low if calc_result.indicator else None,
+        )
+        
+        # Write indicator data
+        should_emit_out = self._last_out_ts is None or market.ts > self._last_out_ts
+        if should_emit_out:
+            try:
+                self._repo.write_indicator(
+                    self._keys,
+                    snapshot,
+                    self._config.stream_maxlen_ind,
+                )
+                self._last_out_ts = market.ts
+            except Exception as e:
+                LOG.error("[calc %s] Failed to write indicator: %s", self._symbol, e)
+        
+        # Process signals (only in live mode)
+        if is_live:
+            self._process_signals(market.ts, regime, calc_result.indicator)
+        
+        # Debug logging
+        if ma20 and ma200 and LOG.isEnabledFor(logging.DEBUG):
+            LOG.debug(
+                "[%s 2m] ts=%s close=%s ma20=%.2f ma200=%.2f regime=%s",
+                self._symbol, market.ts, market.close, ma20, ma200, regime
+            )
+    
+    def _log_warmup_progress(self, close: float) -> None:
+        """Log indicator warmup progress periodically."""
+        now = time.time()
+        if now - self._last_warmup_log >= self._config.warmup_log_interval_sec:
+            rem20 = max(0, 20 - self._sma20.count)
+            rem200 = max(0, 200 - self._sma200.count)
+            LOG.info(
+                "[%s 2m] close=%s warmup: ma20 in %d bars, ma200 in %d bars",
+                self._symbol, close, rem20, rem200
+            )
+            self._last_warmup_log = now
+    
+    def _process_signals(
+        self,
+        ts: int,
+        regime: str,
+        indicator_candle: Optional[Candle],
+    ) -> None:
+        """Generate and emit trading signals based on regime changes."""
+        # Skip if already processed this timestamp
+        should_emit = self._last_sig_ts is None or ts > self._last_sig_ts
+        if not should_emit:
+            if LOG.isEnabledFor(logging.DEBUG):
                 LOG.debug(
-                    "[%s 2m] ts=%s close=%s ma20=%.2f ma200=%.2f regime=%s ind=%s",
-                    sym, ts, close, v20, v200, regime, out['ind_ts'] or "-"
+                    "[%s SIGNAL] Skip emit @%s (already processed)",
+                    self._symbol, ts
+                )
+            return
+        
+        # Generate signals
+        signals = self._signal_gen.process(ts, regime, indicator_candle)
+        
+        # Emit each signal
+        for signal_payload in signals:
+            self._current_sig_seq += 1
+            msg_id = f"{ts}-{self._current_sig_seq}"
+            
+            try:
+                self._repo.write_signal(
+                    self._keys.signal_out,
+                    signal_payload,
+                    msg_id,
+                    self._config.stream_maxlen_signal,
+                )
+                self._last_sig_ts = ts
+                
+                # Log based on signal type
+                if signal_payload["type"] == SignalType.ARM.value:
+                    LOG.info(
+                        "[%s SIGNAL] ARM %s ind_ts=%s trig=%s stop=%s",
+                        self._symbol,
+                        signal_payload["side"],
+                        signal_payload["ind_ts"],
+                        signal_payload["trigger"],
+                        signal_payload["stop"],
+                    )
+                else:
+                    LOG.info(
+                        "[%s SIGNAL] DISARM side=%s reason=%s",
+                        self._symbol,
+                        signal_payload.get("prev_side", "?"),
+                        signal_payload.get("reason", "?"),
+                    )
+            except Exception as e:
+                LOG.error(
+                    "[calc %s] Failed to write signal (type=%s): %s",
+                    self._symbol,
+                    signal_payload.get("type"),
+                    e,
                 )
 
-            last_regime = regime
 
-# ─────────────────────── Crash-guard wrapper ─────────────────────
-async def consume_symbol_guarded(sym: str):
-    LOG.info("[calc %s] launching guarded task", sym.upper())
-    try:
-        await consume_symbol(sym)
-    except asyncio.CancelledError:
-        LOG.info("[calc %s] task cancelled", sym.upper())
-        raise
-    except Exception as e:
-        LOG.exception("[calc %s] task crashed: %s", sym.upper(), e)
+# ═══════════════════════════════════════════════════════════════
+#  SERVICE ORCHESTRATION
+# ═══════════════════════════════════════════════════════════════
 
-# ───────────────────────────── main() ────────────────────────────
-async def main():
+async def run_symbol_processor(symbol: str, config: CalcConfig) -> None:
+    """Run the stream processor for a symbol with crash recovery."""
+    symbol = symbol.upper().strip()
+    LOG.info("[calc %s] Launching processor", symbol)
+    
+    backoff = 1.0
+    repository = RedisRepositoryImpl(r_ingestor)
+    
+    while True:
+        try:
+            processor = StreamProcessor(symbol, config, repository)
+            await processor.run()
+            LOG.warning("[calc %s] Processor exited normally (will restart)", symbol)
+        except asyncio.CancelledError:
+            LOG.info("[calc %s] Processor cancelled", symbol)
+            raise
+        except Exception as e:
+            LOG.exception("[calc %s] Processor crashed: %s", symbol, e)
+        
+        # Exponential backoff with cap
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2.0, 30.0)
+
+
+async def main() -> None:
+    """Main entry point for the calculator service."""
+    config = CalcConfig.from_env()
+    
+    # Get configured symbols
     pairs = settings.pairs_1m_list()
-    # keep only 1m entries; uppercase symbols to match stream keys
-    syms = []
-    for sym, tf in pairs:
-        if (tf or "").strip().lower() == "1m":
-            syms.append(sym.upper())
-
-    if not syms:
+    symbols = sorted({sym.upper().strip() for sym, _ in pairs if sym})
+    
+    if not symbols:
         raise RuntimeError("No symbols configured")
-    LOG.info("Starting calc service for symbols: %s", syms)
+    
+    LOG.info("Starting calc service for symbols: %s", symbols)
+    
+    # Create tasks for each symbol
+    tasks = []
+    for symbol in symbols:
+        task = asyncio.create_task(
+            run_symbol_processor(symbol, config),
+            name=f"calc:{symbol}",
+        )
+        tasks.append(task)
+        LOG.info("[calc %s] Task created", symbol)
+    
+    # Run all tasks
+    try:
+        await asyncio.gather(*tasks)
+    except KeyboardInterrupt:
+        LOG.info("Shutting down calculator service")
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-    tasks = [asyncio.create_task(consume_symbol_guarded(sym)) for sym in syms]
-    await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
     asyncio.run(main())

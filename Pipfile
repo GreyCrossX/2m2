@@ -18,11 +18,11 @@ psycopg2-binary = "*"
 celery = "*"
 redis = "*"
 cryptography = "*"
-binance-sdk-derivatives-trading-usds-futures = "*"
 pytest = "*"
 fakeredis = "*"
 pytest-asyncio = "*"
 pytest-timeout = "*"
+binance-sdk-derivatives-trading-usds-futures = "*"
 
 [dev-packages]
 
