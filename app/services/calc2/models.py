@@ -6,38 +6,49 @@ from dataclasses import dataclass
 from enum import Enum
 from decimal import Decimal
 from typing import Optional, Literal, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 Color = Literal["green", "red"]
-Regime = Literal["long", "short"]
+Regime = Literal["long", "short", "neutral"]
 SignalType = Literal["arm", "disarm"]
 
 @dataclass(frozen=True)
 class Candle:
     """Market candle data."""
     ts: int
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
+    sym: str
+    tf: str
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
     trades: int
     color: Color
     
     @staticmethod
     def from_msg(msg: Dict[str, Any]) -> "Candle":
-    # All fields arrive as strings per input schema
-        return Candle(
-        ts=int(msg["ts"]),
-        sym=str(msg["sym"]),
-        tf=str(msg["tf"]),
-        open=Decimal(str(msg["open"])),
-        high=Decimal(str(msg["high"])),
-        low=Decimal(str(msg["low"])),
-        close=Decimal(str(msg["close"])),
-        volume=Decimal(str(msg.get("volume", "0"))),
-        trades=int(msg.get("trades", 0)),
-        color=("green" if str(msg.get("color", "")).lower() == "green" else "red"),
-    )
+        """Parse candle from Redis stream message."""
+        try:
+            candle = Candle(
+                ts=int(msg["ts"]),
+                sym=str(msg["sym"]),
+                tf=str(msg["tf"]),
+                open=Decimal(str(msg["open"])),
+                high=Decimal(str(msg["high"])),
+                low=Decimal(str(msg["low"])),
+                close=Decimal(str(msg["close"])),
+                volume=Decimal(str(msg.get("volume", "0"))),
+                trades=int(msg.get("trades", 0)),
+                color=("green" if str(msg.get("color", "")).lower() == "green" else "red"),
+            )
+            logger.debug("Candle parsed | ts=%d sym=%s close=%s", candle.ts, candle.sym, candle.close)
+            return candle
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error("Failed to parse candle | error=%s msg=%s", e, msg)
+            raise ValueError(f"Invalid candle message: {e}") from e
 
 
 @dataclass(frozen=True)
@@ -62,7 +73,8 @@ class IndicatorState:
     def to_stream_map(self) -> Dict[str, str]:
         def _fmt(x):
             return f"{x}" if x is not None else ""
-        return {
+        
+        result = {
             "v": self.v,
             "sym": self.sym,
             "tf": self.tf,
@@ -79,11 +91,13 @@ class IndicatorState:
             "ind_high": _fmt(self.ind_high),
             "ind_low": _fmt(self.ind_low),
         }
+        logger.debug("IndicatorState serialized | ts=%d regime=%s", self.ts, self.regime)
+        return result
 
 
 @dataclass(frozen=True)
 class ArmSignal:
-    v:str
+    v: str
     type: SignalType
     side: Regime
     sym: str
@@ -95,8 +109,8 @@ class ArmSignal:
     trigger: Decimal
     stop: Decimal
 
-    def _to_stream_map(self) -> Dict[str, str]:
-        return {
+    def to_stream_map(self) -> Dict[str, str]:
+        result = {
             "v": self.v,
             "type": self.type,
             "side": self.side,
@@ -109,6 +123,9 @@ class ArmSignal:
             "trigger": f"{self.trigger}",
             "stop": f"{self.stop}",
         }
+        logger.debug("ArmSignal serialized | side=%s trigger=%s stop=%s", 
+                    self.side, self.trigger, self.stop)
+        return result
     
 @dataclass(frozen=True)
 class DisarmSignal:
@@ -120,9 +137,8 @@ class DisarmSignal:
     ts: int
     reason: str
 
-
     def to_stream_map(self) -> Dict[str, str]:
-        return {
+        result = {
             "v": self.v,
             "type": self.type,
             "prev_side": self.prev_side,
@@ -131,3 +147,6 @@ class DisarmSignal:
             "ts": str(self.ts),
             "reason": self.reason,
         }
+        logger.debug("DisarmSignal serialized | prev_side=%s reason=%s", 
+                    self.prev_side, self.reason)
+        return result

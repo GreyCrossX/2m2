@@ -33,6 +33,10 @@ class Config:
     tick_size: float = field(default_factory=lambda: _env_float("TICK_SIZE", 0.01))
     backoff_min_s: float = field(default_factory=lambda: _env_float("BACKOFF_MIN_S", 0.5))
     backoff_max_s: float = field(default_factory=lambda: _env_float("BACKOFF_MAX_S", 30.0))
+    
+    # Catchup mode: threshold in milliseconds to consider data "live"
+    # Default 5000ms = within 5 seconds of current time means we're caught up
+    catchup_threshold_ms: int = field(default_factory=lambda: _env_int("CATCHUP_THRESHOLD_MS", 5000))
 
     # Bootstrapping history depth for moving averages
     ma20_window: int = 20
