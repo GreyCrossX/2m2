@@ -725,10 +725,8 @@ async def run_symbol_processor(symbol: str, config: CalcConfig) -> None:
         except Exception as e:
             LOG.exception("[calc %s] Processor crashed: %s", symbol, e)
         
-        # Exponential backoff with cap
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2.0, 30.0)
-
 
 async def main() -> None:
     """Main entry point for the calculator service."""
@@ -743,7 +741,8 @@ async def main() -> None:
     
     LOG.info("Starting calc service for symbols: %s", symbols)
     
-    # Create tasks for each symbol
+    # Create ALL tasks FIRST without any awaits in the loop
+    # This is the KEY fix - don't await anything while creating tasks
     tasks = []
     for symbol in symbols:
         task = asyncio.create_task(
@@ -752,8 +751,11 @@ async def main() -> None:
         )
         tasks.append(task)
         LOG.info("[calc %s] Task created", symbol)
+        # NO await here! That's what blocks the loop
     
-    # Run all tasks
+    LOG.info("All %d tasks created, starting execution", len(tasks))
+    
+    # NOW let them all run concurrently
     try:
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:

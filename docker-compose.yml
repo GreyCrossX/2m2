@@ -162,6 +162,33 @@ services:
       - ./app:/app/app
       - ./app/services/calc:/app/services/calc
 
+  calc2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m,ETHUSDT:1m}
+      - PRICE_TICK_DEFAULT=${PRICE_TICK_DEFAULT:-0.01}
+      # Optional: calc’s own stream retention (if used there)
+      - STREAM_MAXLEN_IND=${STREAM_MAXLEN_IND:-5000}
+      - STREAM_MAXLEN_SIGNAL=${STREAM_MAXLEN_SIGNAL:-2000}
+      - STREAM_RETENTION_MS_IND=${STREAM_RETENTION_MS_IND:-0}
+      - STREAM_RETENTION_MS_SIGNAL=${STREAM_RETENTION_MS_SIGNAL:-0}
+    working_dir: /app
+    command: ["python", "-m", "services.calc2.main"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      ingestor:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./app:/app/app
+      - ./app/services/calc2:/app/services/calc2
+
   # ─────────────── Signal poller (calc → Celery) ───────────────
   poller:
     build:
