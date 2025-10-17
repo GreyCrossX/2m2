@@ -56,7 +56,9 @@ class StreamConsumer:
                 
                 # Handle empty response
                 if not response:
-                    logger.debug("No new messages (timeout) | key=%s", stream_key)
+                    logger.debug("No new messages (timeout) | key=%s last_id=%s", stream_key, self._last_id)
+                    # Yield control to other tasks
+                    await asyncio.sleep(0)
                     continue
                 
                 # Redis xread returns a list of [stream_key, entries]
