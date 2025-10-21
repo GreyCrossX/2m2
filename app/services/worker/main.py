@@ -5,6 +5,7 @@ import logging
 import signal
 from typing import Callable
 from uuid import UUID
+from decimal import Decimal
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,7 +52,7 @@ async def main_async() -> None:
     redis = Redis.from_url(cfg.redis_url, decode_responses=False)
     session_factory = create_session_factory(cfg.postgres_dsn)
 
-    async with session_factory() as db:  # type: AsyncSession
+    async with session_factory() as db:
         bot_repo = BotRepository(db)
         cred_repo = CredentialRepository(db)
         order_gateway = OrderGateway(db)
