@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 import signal
-from typing import Callable
+from typing import Dict, Tuple
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -18,6 +18,8 @@ from .application.signal_processor import SignalProcessor
 from .config import Config
 from .core.poller import WorkerPoller
 from .core.router import SymbolRouter
+from .domain.models import BotConfig
+from .infrastructure.binance.account import BinanceAccount
 from .infrastructure.binance.client import BinanceClient
 from .infrastructure.binance.trading import BinanceTrading
 from .infrastructure.cache.balance_cache import BalanceCache
@@ -32,17 +34,17 @@ log = logging.getLogger("worker.main")
 
 async def _ping_redis(redis: Redis, *, retries: int = 60, delay: float = 1.0) -> None:
     """Verify Redis connectivity with retry logic for AOF loading scenarios."""
-    for i in range(retries):
+    for attempt in range(1, retries + 1):
         try:
             pong = await redis.ping()
-            log.info("Redis ping OK (attempt %d/%d): %s", i + 1, retries, pong)
+            log.info("Redis ping OK (attempt %d/%d): %s", attempt, retries, pong)
             return
-        except Exception as e:
-            msg = str(e)
+        except Exception as exc:  # pragma: no cover - connection issues are environment-specific
+            msg = str(exc)
             if "LOADING" in msg or "loading the dataset" in msg:
-                log.info("Redis loading AOF... waiting (%d/%d)", i + 1, retries)
+                log.info("Redis loading AOF... waiting (%d/%d)", attempt, retries)
             else:
-                log.warning("Redis ping failed (%d/%d): %s", i + 1, retries, msg)
+                log.warning("Redis ping failed (%d/%d): %s", attempt, retries, msg)
         await asyncio.sleep(delay)
     raise RuntimeError("Redis not ready after retries")
 
@@ -54,23 +56,10 @@ async def _ping_db(session: AsyncSession) -> None:
     log.info("Postgres ping OK")
 
 
-async def _build_trading_client(
-    bot_cfg,
-    bot_repo: BotRepository
-) -> BinanceTrading:
-    """Create a BinanceTrading instance for a specific bot configuration."""
-    _bot_orm, _cred_orm, api_key, api_secret = await bot_repo.get_bot_with_credentials_raw(bot_cfg.id)
-    client = BinanceClient(
-        api_key=api_key,
-        api_secret=api_secret,
-        testnet=(bot_cfg.env == "testnet")
-    )
-    return BinanceTrading(client)
-
-
 def _setup_signal_handlers(stop_event: asyncio.Event) -> None:
     """Configure graceful shutdown signal handlers."""
-    def handle_signal(*_):
+
+    def handle_signal(*_: object) -> None:
         log.info("Shutdown signal received")
         stop_event.set()
 
@@ -101,71 +90,98 @@ async def main_async() -> None:
     async with session_factory() as db_ping:
         await _ping_db(db_ping)
 
-    async with session_factory() as db:
-        bot_repo = BotRepository(db)
-        cred_repo = CredentialRepository(db)
-        order_gateway = OrderGateway(db)
-        router = SymbolRouter()
+    bot_repo = BotRepository(session_factory)
+    cred_repo = CredentialRepository(session_factory)
+    order_gateway = OrderGateway(session_factory)
+    router = SymbolRouter()
 
-        balance_cache = BalanceCache(ttl_seconds=cfg.balance_ttl_seconds)
-        balance_validator = BalanceValidator(
-            binance_account=None,
-            balance_cache=balance_cache,
-        )
-        position_manager = PositionManager(binance_client=None)
+    balance_cache = BalanceCache(ttl_seconds=cfg.balance_ttl_seconds)
 
-        order_executor = OrderExecutor(
-            balance_validator=balance_validator,
-            binance_client=None,
-            position_manager=position_manager,
-        )
-        
-        async def trading_factory(bot_cfg):
-            return await _build_trading_client(bot_cfg, bot_repo)
-        
-        order_executor.trading_factory = trading_factory
+    client_cache: Dict[Tuple[UUID, str], BinanceClient] = {}
+    client_lock = asyncio.Lock()
 
-        signal_processor = SignalProcessor(
-            router=router,
-            bot_repository=bot_repo,
-            order_executor=order_executor,
-            order_gateway=order_gateway,
-        )
+    async def get_binance_client(cred_id: UUID, env: str) -> BinanceClient:
+        key = (cred_id, env.lower())
+        cached = client_cache.get(key)
+        if cached is not None:
+            return cached
+        async with client_lock:
+            cached = client_cache.get(key)
+            if cached is not None:
+                return cached
+            api_key, api_secret = await cred_repo.get_plaintext_credentials(cred_id)
+            client = BinanceClient(
+                api_key=api_key,
+                api_secret=api_secret,
+                testnet=(env.lower() == "testnet"),
+            )
+            client_cache[key] = client
+            return client
 
-        consumer = SignalStreamConsumer(
-            redis=redis,
-            symbols=cfg.symbols,
-            timeframe=cfg.timeframe,
-            block_ms=cfg.stream_block_ms,
-            start_from_latest=True,
-            use_consumer_group=False,
-            persist_offsets=True,
-            catchup_threshold_ms=cfg.catchup_threshold_ms,
-        )
+    binance_account = BinanceAccount(get_binance_client)
 
-        poller = WorkerPoller(
-            config=cfg,
-            stream_consumer=consumer,
-            signal_processor=signal_processor,
-            router=router,
-            bot_repository=bot_repo,
-            router_refresh_seconds=cfg.router_refresh_seconds,
-        )
+    balance_validator = BalanceValidator(
+        binance_account=binance_account,
+        balance_cache=balance_cache,
+    )
 
-        stop_event = asyncio.Event()
-        _setup_signal_handlers(stop_event)
+    position_manager = PositionManager(binance_client=None)
 
-        runner = asyncio.create_task(poller.start(), name="worker.poller")
-        log.info("WorkerPoller task started")
+    async def trading_factory(bot_cfg: BotConfig) -> BinanceTrading:
+        client = await get_binance_client(bot_cfg.cred_id, bot_cfg.env)
+        return BinanceTrading(client)
 
+    order_executor = OrderExecutor(
+        balance_validator=balance_validator,
+        position_manager=position_manager,
+        trading_factory=trading_factory,
+    )
+
+    signal_processor = SignalProcessor(
+        router=router,
+        bot_repository=bot_repo,
+        order_executor=order_executor,
+        order_gateway=order_gateway,
+        trading_factory=trading_factory,
+    )
+
+    consumer = SignalStreamConsumer(
+        redis=redis,
+        symbols=cfg.symbols,
+        timeframe=cfg.timeframe,
+        block_ms=cfg.stream_block_ms,
+        start_from_latest=True,
+        use_consumer_group=False,
+        persist_offsets=True,
+        catchup_threshold_ms=cfg.catchup_threshold_ms,
+    )
+
+    poller = WorkerPoller(
+        config=cfg,
+        stream_consumer=consumer,
+        signal_processor=signal_processor,
+        router=router,
+        bot_repository=bot_repo,
+        router_refresh_seconds=cfg.router_refresh_seconds,
+    )
+
+    stop_event = asyncio.Event()
+    _setup_signal_handlers(stop_event)
+
+    runner = asyncio.create_task(poller.start(), name="worker.poller")
+    log.info("WorkerPoller task started")
+
+    try:
         await stop_event.wait()
+    finally:
         log.info("Stopping poller...")
         await poller.stop()
         runner.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runner
-
-    await redis.close()
+        await redis.close()
+        with contextlib.suppress(Exception):
+            await redis.connection_pool.disconnect()
     log.info("Worker stopped cleanly")
 
 
@@ -174,7 +190,7 @@ def main() -> None:
         asyncio.run(main_async())
     except KeyboardInterrupt:
         pass
-    except Exception:
+    except Exception:  # pragma: no cover - startup exceptions bubble up
         log.exception("Fatal error during worker startup")
         raise
 

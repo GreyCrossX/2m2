@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from __future__ import annotations
+
 from decimal import Decimal
 from typing import List, Optional, Tuple
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-# ORM models (your current schema)
-from app.db.models.bots import Bot as ORMBot          # adjust import if your path differs
-from app.db.models.credentials import ApiCredential as ORMCred  # adjust import if your path differs
+# ORM models
+from app.db.models.bots import Bot as ORMBot
+from app.db.models.credentials import ApiCredential as ORMCred
 
 # Domain
-from ...domain.models import BotConfig
 from ...domain.enums import Side
+from ...domain.models import BotConfig
 
 
 # ---------- mapping helpers ----------
@@ -63,73 +64,52 @@ def _to_bot_config(row: ORMBot) -> BotConfig:
 # ---------- Repositories ----------
 
 class BotRepository:
-    """
-    Adapter over SQLAlchemy AsyncSession that returns Domain BotConfig objects.
-    Also offers a raw accessor with decrypted credentials when needed.
-    """
-    def __init__(self, session: AsyncSession):
-        self._session = session
+    """Adapter that exposes BotConfig records using a session factory."""
 
-    # ---- Application-layer port: Optional[BotConfig] by id ----
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
+        self._session_factory = session_factory
+
     async def get_bot(self, bot_id: UUID) -> Optional[BotConfig]:
-        stmt = select(ORMBot).where(ORMBot.id == bot_id)
-        res = await self._session.execute(stmt)
-        row: Optional[ORMBot] = res.scalars().first()
-        return _to_bot_config(row) if row else None
+        async with self._session_factory() as session:
+            stmt = select(ORMBot).where(ORMBot.id == bot_id)
+            res = await session.execute(stmt)
+            row: Optional[ORMBot] = res.scalars().first()
+            return _to_bot_config(row) if row else None
 
-    # ---- For router & orchestration: enabled bots ----
     async def get_enabled_bots(self) -> List[BotConfig]:
-        stmt = select(ORMBot).where(ORMBot.enabled == True)  # noqa: E712
-        res = await self._session.execute(stmt)
-        return [_to_bot_config(row) for row in res.scalars().all()]
+        async with self._session_factory() as session:
+            stmt = select(ORMBot).where(ORMBot.enabled == True)  # noqa: E712
+            res = await session.execute(stmt)
+            return [_to_bot_config(row) for row in res.scalars().all()]
 
-    # ---- For router filtering by (symbol, timeframe) ----
-    async def get_bots_by_symbol(self, symbol: str, timeframe: str) -> List[BotConfig]:
-        stmt = (
-            select(ORMBot)
-            .where(ORMBot.symbol == symbol.upper())
-            .where(ORMBot.timeframe == timeframe)
-            .where(ORMBot.enabled == True)  # noqa: E712
-        )
-        res = await self._session.execute(stmt)
-        return [_to_bot_config(row) for row in res.scalars().all()]
-
-    # ---- Raw ORM + creds (when you need plaintext for client factories) ----
-    async def get_bot_with_credentials_raw(self, bot_id: UUID) -> Tuple[ORMBot, ORMCred, str, str]:
-        """
-        Return (bot_orm, cred_orm, api_key, api_secret).
-        Uses the model's get_decrypted() helper to avoid leaking encryption details here.
-        """
-        # Bot
-        bot_stmt = select(ORMBot).where(ORMBot.id == bot_id)
-        bot_res = await self._session.execute(bot_stmt)
-        bot: Optional[ORMBot] = bot_res.scalars().first()
-        if not bot:
-            raise LookupError(f"Bot {bot_id} not found")
-
-        # Credential
-        cred_stmt = select(ORMCred).where(ORMCred.id == bot.cred_id)
-        cred_res = await self._session.execute(cred_stmt)
-        cred: Optional[ORMCred] = cred_res.scalars().first()
-        if not cred:
-            raise LookupError(f"Credential for bot {bot_id} not found")
-
-        api_key, api_secret = cred.get_decrypted()
-        return bot, cred, api_key, api_secret
+    async def get_bot_credentials(self, bot_id: UUID) -> Tuple[BotConfig, str, str]:
+        async with self._session_factory() as session:
+            stmt = (
+                select(ORMBot, ORMCred)
+                .join(ORMCred, ORMCred.id == ORMBot.cred_id)
+                .where(ORMBot.id == bot_id)
+            )
+            res = await session.execute(stmt)
+            result = res.first()
+            if not result:
+                raise LookupError(f"Bot {bot_id} not found")
+            bot_row, cred_row = result
+            api_key, api_secret = cred_row.get_decrypted()
+            return _to_bot_config(bot_row), api_key, api_secret
 
 
 class CredentialRepository:
-    """
-    Focused adapter to fetch/decrypt ApiCredential.
-    """
-    def __init__(self, session: AsyncSession):
-        self._session = session
+    """Fetch/decrypt ApiCredential secrets on demand."""
 
-    async def get_credential(self, cred_id: UUID) -> Tuple[ORMCred, str, str]:
-        stmt = select(ORMCred).where(ORMCred.id == cred_id)
-        res = await self._session.execute(stmt)
-        cred: Optional[ORMCred] = res.scalars().first()
-        if not cred:
-            raise LookupError(f"Credential {cred_id} not found")
-        api_key, api_secret = cred.get_decrypted()
-        return cred, api_key, api_secret
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
+        self._session_factory = session_factory
+
+    async def get_plaintext_credentials(self, cred_id: UUID) -> Tuple[str, str]:
+        async with self._session_factory() as session:
+            stmt = select(ORMCred).where(ORMCred.id == cred_id)
+            res = await session.execute(stmt)
+            cred: Optional[ORMCred] = res.scalars().first()
+            if not cred:
+                raise LookupError(f"Credential {cred_id} not found")
+            api_key, api_secret = cred.get_decrypted()
+            return api_key, api_secret

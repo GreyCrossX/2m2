@@ -49,12 +49,10 @@ class BotWorker:
                 order_id=None,
                 status=OrderStatus.SKIPPED_WHITELIST,
                 side=signal.side,
-                symbol=signal.sym,
+                symbol=signal.symbol,
                 trigger_price=signal.trigger,
                 stop_price=signal.stop,
                 quantity=Decimal("0"),
-                created_at=signal.created_at,
-                updated_at=signal.created_at,
             )
             self._state = st
             return st

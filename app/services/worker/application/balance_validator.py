@@ -11,8 +11,8 @@ from ..domain.models import BotConfig
 # --------- Ports (to be implemented by Infra) ---------
 
 class BinanceAccount(Protocol):
-    async def fetch_usdt_balance(self, user_id: UUID, env: str) -> Decimal: ...
-    async def fetch_used_margin(self, user_id: UUID, env: str) -> Decimal: ...
+    async def fetch_usdt_balance(self, cred_id: UUID, env: str) -> Decimal: ...
+    async def fetch_used_margin(self, cred_id: UUID, env: str) -> Decimal: ...
 
 
 class BalanceCache(Protocol):
@@ -42,21 +42,21 @@ class BalanceValidator:
         2) Check available >= required_margin
         3) Return (ok, available)
         """
-        available = await self.get_available_balance(bot.user_id, bot.env)
+        available = await self.get_available_balance(bot.cred_id, bot.env)
         ok = available >= required_margin
         return ok, available
 
     async def get_available_balance(
         self,
-        user_id: UUID,
+        cred_id: UUID,
         env: str,
     ) -> Decimal:
-        cached = await self.balance_cache.get(user_id, env)
+        cached = await self.balance_cache.get(cred_id, env)
         if cached is not None:
             return cached
 
-        total_free = await self.binance_account.fetch_usdt_balance(user_id, env)
-        used_margin = await self.binance_account.fetch_used_margin(user_id, env)
+        total_free = await self.binance_account.fetch_usdt_balance(cred_id, env)
+        used_margin = await self.binance_account.fetch_used_margin(cred_id, env)
 
         # Defensive
         if total_free < 0:
@@ -68,5 +68,5 @@ class BalanceValidator:
         if available < 0:
             available = Decimal("0")
 
-        await self.balance_cache.set(user_id, env, available)
+        await self.balance_cache.set(cred_id, env, available)
         return available

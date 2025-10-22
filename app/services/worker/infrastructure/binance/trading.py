@@ -29,6 +29,8 @@ class BinanceTrading:
     ) -> Dict:
         # Quantize to exchange constraints
         q_qty, q_price = await self._client.quantize(symbol, quantity, price)
+        if q_qty <= 0 or q_price is None or q_price <= 0:
+            raise ValueError("Quantized quantity/price invalid for limit order")
 
         side_str = "BUY" if side == Side.LONG else "SELL"
         # Some SDKs accept bool, others strings — try bool first
@@ -51,6 +53,8 @@ class BinanceTrading:
     ) -> Dict:
         # Quantize qty; stopPrice uses tick filter too, but many exchanges accept more decimals — still safe to snap
         q_qty, q_stop = await self._client.quantize(symbol, quantity, stop_price)
+        if q_qty <= 0 or q_stop is None or q_stop <= 0:
+            raise ValueError("Quantized quantity/stop invalid for stop-market order")
         # Protective side is opposite
         side_str = "SELL" if side == Side.LONG else "BUY"
         return await self._client.new_order(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
 from ..domain.enums import Side
@@ -63,6 +63,14 @@ class SymbolRouter:
             cache[b.id] = b
         self._subscriptions = subs
         self._bot_configs = cache
+
+    def get_bot_ids(self, symbol: str, timeframe: str) -> List[UUID]:
+        """Return bot IDs subscribed to (symbol, timeframe)."""
+        key = (symbol.upper(), timeframe)
+        return list(self._subscriptions.get(key, []))
+
+    def get_bot_config(self, bot_id: UUID) -> Optional[BotConfig]:
+        return self._bot_configs.get(bot_id)
 
     def symbols(self) -> List[str]:
         """Return the distinct symbol list currently in the router."""
