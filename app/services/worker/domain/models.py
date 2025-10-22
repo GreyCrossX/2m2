@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping, Optional, Union
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .enums import OrderStatus, SignalType, Side
 from .exceptions import InvalidSignalException
@@ -234,6 +234,7 @@ class OrderState:
 
     Note: timestamps are UTC.
     """
+    id: UUID = field(default_factory=uuid4)
     bot_id: UUID
     signal_id: str                   # Redis stream message ID
     status: OrderStatus

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Awaitable, Callable, Optional, Protocol
+from uuid import UUID
 
 from ..domain.models import ArmSignal, BotConfig, OrderState
 from ..domain.enums import OrderStatus, Side
@@ -12,7 +13,7 @@ from ..domain.exceptions import BinanceAPIException
 
 class BalanceValidatorPort(Protocol):
     async def validate_balance(self, bot: BotConfig, required_margin: Decimal) -> tuple[bool, Decimal]: ...
-    async def get_available_balance(self, user_id, env: str) -> Decimal: ...
+    async def get_available_balance(self, cred_id: UUID, env: str) -> Decimal: ...
 
 
 class TradingPort(Protocol):
@@ -74,7 +75,7 @@ class OrderExecutor:
         signal: ArmSignal,
     ) -> OrderState:
         # --- 1) Compute intended size using *available* balance
-        available = await self._bal.get_available_balance(bot.user_id, bot.env)
+        available = await self._bal.get_available_balance(bot.cred_id, bot.env)
         qty = self._calculate_position_size(bot, available, signal.trigger)
         if qty <= 0:
             return OrderState(

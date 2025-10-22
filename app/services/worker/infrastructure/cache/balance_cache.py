@@ -15,8 +15,8 @@ class BalanceCache:
         self._cache: Dict[Tuple[UUID, str], Tuple[Decimal, float]] = {}
         self._ttl = ttl_seconds
 
-    async def get(self, user_id: UUID, env: str) -> Optional[Decimal]:
-        key = (user_id, env)
+    async def get(self, cred_id: UUID, env: str) -> Optional[Decimal]:
+        key = (cred_id, env)
         item = self._cache.get(key)
         if not item:
             return None
@@ -26,9 +26,9 @@ class BalanceCache:
             return None
         return value
 
-    async def set(self, user_id: UUID, env: str, balance: Decimal) -> None:
-        key = (user_id, env)
+    async def set(self, cred_id: UUID, env: str, balance: Decimal) -> None:
+        key = (cred_id, env)
         self._cache[key] = (balance, time.time())
 
-    async def invalidate(self, user_id: UUID, env: str) -> None:
-        self._cache.pop((user_id, env), None)
+    async def invalidate(self, cred_id: UUID, env: str) -> None:
+        self._cache.pop((cred_id, env), None)

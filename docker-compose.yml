@@ -204,7 +204,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      calc:
+      calc2:
         condition: service_started
     restart: unless-stopped
     volumes:
@@ -345,7 +345,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      calc:
+      calc2:
         condition: service_started
     restart: unless-stopped
     volumes:

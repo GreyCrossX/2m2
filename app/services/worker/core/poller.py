@@ -1,9 +1,10 @@
 from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Dict, Optional
-import contextlib
 
 from ..application.signal_processor import SignalProcessor
 from ..domain.enums import SignalType
