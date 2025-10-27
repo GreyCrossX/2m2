@@ -83,20 +83,29 @@ async def main_async() -> None:
     log.info("  Catchup Threshold: %dms", cfg.catchup_threshold_ms)
     log.info("=" * 72)
 
+    log.info("Connecting to Redis...")
     redis = Redis.from_url(cfg.redis_url, decode_responses=False)
+    
+    log.info("Creating Postgres session factory...")
     session_factory = create_session_factory(cfg.postgres_dsn)
 
+    log.info("Verifying connectivity...")
     await _ping_redis(redis)
     async with session_factory() as db_ping:
         await _ping_db(db_ping)
+    log.info("Connectivity verified successfully")
 
+    log.info("Initializing repositories...")
     bot_repo = BotRepository(session_factory)
     cred_repo = CredentialRepository(session_factory)
     order_gateway = OrderGateway(session_factory)
     router = SymbolRouter()
+    log.info("Repositories initialized")
 
+    log.info("Initializing balance cache (TTL=%ds)...", cfg.balance_ttl_seconds)
     balance_cache = BalanceCache(ttl_seconds=cfg.balance_ttl_seconds)
 
+    log.info("Setting up Binance client cache...")
     client_cache: Dict[Tuple[UUID, str], BinanceClient] = {}
     client_lock = asyncio.Lock()
 
@@ -104,11 +113,13 @@ async def main_async() -> None:
         key = (cred_id, env.lower())
         cached = client_cache.get(key)
         if cached is not None:
+            log.debug("Using cached Binance client | cred_id=%s env=%s", cred_id, env)
             return cached
         async with client_lock:
             cached = client_cache.get(key)
             if cached is not None:
                 return cached
+            log.info("Creating new Binance client | cred_id=%s env=%s", cred_id, env)
             api_key, api_secret = await cred_repo.get_plaintext_credentials(cred_id)
             client = BinanceClient(
                 api_key=api_key,
@@ -116,8 +127,11 @@ async def main_async() -> None:
                 testnet=(env.lower() == "testnet"),
             )
             client_cache[key] = client
+            log.info("Binance client created and cached | cred_id=%s env=%s testnet=%s", 
+                    cred_id, env, env.lower() == "testnet")
             return client
 
+    log.info("Initializing application services...")
     binance_account = BinanceAccount(get_binance_client)
 
     balance_validator = BalanceValidator(
@@ -128,6 +142,7 @@ async def main_async() -> None:
     position_manager = PositionManager(binance_client=None)
 
     async def trading_factory(bot_cfg: BotConfig) -> BinanceTrading:
+        log.debug("Creating trading adapter | bot_id=%s symbol=%s", bot_cfg.id, bot_cfg.symbol)
         client = await get_binance_client(bot_cfg.cred_id, bot_cfg.env)
         return BinanceTrading(client)
 
@@ -144,7 +159,9 @@ async def main_async() -> None:
         order_gateway=order_gateway,
         trading_factory=trading_factory,
     )
+    log.info("Application services initialized")
 
+    log.info("Creating signal stream consumer...")
     consumer = SignalStreamConsumer(
         redis=redis,
         symbols=cfg.symbols,
@@ -155,7 +172,9 @@ async def main_async() -> None:
         persist_offsets=True,
         catchup_threshold_ms=cfg.catchup_threshold_ms,
     )
+    log.info("Signal stream consumer created")
 
+    log.info("Creating worker poller (router refresh: %ds)...", cfg.router_refresh_seconds)
     poller = WorkerPoller(
         config=cfg,
         stream_consumer=consumer,
@@ -167,9 +186,11 @@ async def main_async() -> None:
 
     stop_event = asyncio.Event()
     _setup_signal_handlers(stop_event)
+    log.info("Signal handlers configured")
 
+    log.info("Starting worker poller task...")
     runner = asyncio.create_task(poller.start(), name="worker.poller")
-    log.info("WorkerPoller task started")
+    log.info("WorkerPoller task started - now listening for signals")
 
     try:
         await stop_event.wait()
@@ -179,9 +200,9 @@ async def main_async() -> None:
         runner.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runner
-        await redis.close()
-        with contextlib.suppress(Exception):
-            await redis.connection_pool.disconnect()
+        log.info("Closing Redis connection...")
+        await redis.aclose()
+        log.info("Redis connection closed")
     log.info("Worker stopped cleanly")
 
 

@@ -234,7 +234,6 @@ class OrderState:
 
     Note: timestamps are UTC.
     """
-    id: UUID = field(default_factory=uuid4)
     bot_id: UUID
     signal_id: str                   # Redis stream message ID
     status: OrderStatus
@@ -245,6 +244,7 @@ class OrderState:
     stop_price: Decimal
     quantity: Decimal
 
+    id: UUID = field(default_factory=uuid4)
     order_id: Optional[int] = None   # Binance-assigned orderId (int per UMFutures)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

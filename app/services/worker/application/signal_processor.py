@@ -57,21 +57,47 @@ class SignalProcessor:
         self._executor = order_executor
         self._orders = order_gateway
         self._trading_factory = trading_factory
+        logger.info("SignalProcessor initialized")
 
     async def process_arm_signal(self, signal: ArmSignal, message_id: str) -> List[OrderState]:
         """Handle ARM signals by placing orders for every subscribed bot."""
         if signal.symbol != signal.symbol.upper():
+            logger.error("Signal symbol not uppercased | symbol=%s", signal.symbol)
             raise InvalidSignalException("Signal symbol must be uppercased.")
+
+        logger.info("Processing ARM signal | symbol=%s tf=%s side=%s trigger=%s stop=%s msg_id=%s",
+                   signal.symbol, signal.timeframe, signal.side.value, 
+                   signal.trigger, signal.stop, message_id)
 
         results: List[OrderState] = []
         bot_ids = list(self._router.get_bot_ids(signal.symbol, signal.timeframe))
+        
+        logger.info("Found %d bot(s) subscribed to %s:%s", 
+                   len(bot_ids), signal.symbol, signal.timeframe)
+        
+        if not bot_ids:
+            logger.warning("No bots subscribed to %s:%s - signal will not be processed", 
+                          signal.symbol, signal.timeframe)
+            return results
 
-        for bot_id in bot_ids:
+        for i, bot_id in enumerate(bot_ids, 1):
+            logger.debug("Processing bot %d/%d | bot_id=%s", i, len(bot_ids), bot_id)
+            
             bot = await self._bots.get_bot(bot_id)
-            if bot is None or not bot.enabled:
+            if bot is None:
+                logger.warning("Bot not found in database | bot_id=%s", bot_id)
+                continue
+                
+            if not bot.enabled:
+                logger.info("Bot disabled, skipping | bot_id=%s", bot_id)
                 continue
 
+            logger.info("Checking side whitelist | bot_id=%s bot_whitelist=%s signal_side=%s",
+                       bot_id, bot.side_whitelist.value, signal.side.value)
+
             if not bot.allows_side(signal.side):
+                logger.info("Bot side whitelist blocked signal | bot_id=%s whitelist=%s signal_side=%s",
+                           bot_id, bot.side_whitelist.value, signal.side.value)
                 state = OrderState(
                     bot_id=bot.id,
                     signal_id=message_id,
@@ -82,41 +108,107 @@ class SignalProcessor:
                     stop_price=signal.stop,
                     quantity=Decimal("0"),
                 )
+                logger.debug("Saving SKIPPED_WHITELIST state | bot_id=%s", bot_id)
                 await self._orders.save_state(state)
                 results.append(state)
                 continue
 
-            state = await self._executor.execute_order(bot, signal)
-            state.signal_id = message_id
-            state.touch()
-            await self._orders.save_state(state)
-            results.append(state)
+            logger.info("Executing order | bot_id=%s symbol=%s side=%s trigger=%s",
+                       bot_id, signal.symbol, signal.side.value, signal.trigger)
+            
+            try:
+                state = await self._executor.execute_order(bot, signal)
+                state.signal_id = message_id
+                state.touch()
+                
+                logger.info("Order executed | bot_id=%s status=%s qty=%s order_id=%s",
+                           bot_id, state.status.value, state.quantity, state.order_id or "N/A")
+                
+                logger.debug("Saving order state | bot_id=%s status=%s", bot_id, state.status.value)
+                await self._orders.save_state(state)
+                results.append(state)
+            except Exception as e:
+                logger.error("Order execution failed | bot_id=%s symbol=%s err=%s", 
+                           bot_id, signal.symbol, e, exc_info=True)
+                # Continue processing other bots
+                continue
 
+        logger.info("ARM signal processing complete | symbol=%s bots_processed=%d results=%d msg_id=%s",
+                   signal.symbol, len(bot_ids), len(results), message_id)
+        
+        # Summary of results
+        status_counts = {}
+        for r in results:
+            status_counts[r.status.value] = status_counts.get(r.status.value, 0) + 1
+        if status_counts:
+            logger.info("Result summary | %s", " | ".join(f"{k}={v}" for k, v in status_counts.items()))
+        
         return results
 
     async def process_disarm_signal(self, signal: DisarmSignal, message_id: str) -> List[str]:
         """Cancel pending orders matching the DISARM semantics."""
+        logger.info("Processing DISARM signal | symbol=%s tf=%s prev_side=%s reason=%s msg_id=%s",
+                   signal.symbol, signal.timeframe, signal.prev_side.value, signal.reason, message_id)
+        
         cancelled: List[str] = []
         bot_ids = list(self._router.get_bot_ids(signal.symbol, signal.timeframe))
+        
+        logger.info("Found %d bot(s) subscribed to %s:%s", 
+                   len(bot_ids), signal.symbol, signal.timeframe)
+        
+        if not bot_ids:
+            logger.warning("No bots subscribed to %s:%s - DISARM has no effect", 
+                          signal.symbol, signal.timeframe)
+            return cancelled
 
-        for bot_id in bot_ids:
+        for i, bot_id in enumerate(bot_ids, 1):
+            logger.debug("Processing bot %d/%d for cancellation | bot_id=%s", i, len(bot_ids), bot_id)
+            
             bot = await self._bots.get_bot(bot_id)
-            if bot is None or not bot.enabled:
+            if bot is None:
+                logger.warning("Bot not found in database | bot_id=%s", bot_id)
+                continue
+                
+            if not bot.enabled:
+                logger.info("Bot disabled, skipping | bot_id=%s", bot_id)
                 continue
 
+            logger.debug("Fetching pending orders | bot_id=%s symbol=%s", bot_id, signal.symbol)
             pendings = await self._orders.list_pending_order_states(bot_id, signal.symbol)
-            for state in pendings:
-                if state.side != signal.prev_side or state.status != OrderStatus.PENDING:
+            
+            logger.info("Found %d pending order(s) | bot_id=%s symbol=%s", 
+                       len(pendings), bot_id, signal.symbol)
+            
+            for j, state in enumerate(pendings, 1):
+                logger.debug("Checking pending order %d/%d | bot_id=%s order_id=%s side=%s status=%s",
+                           j, len(pendings), bot_id, state.order_id or "N/A", 
+                           state.side.value, state.status.value)
+                
+                if state.side != signal.prev_side:
+                    logger.debug("Order side mismatch | order_side=%s disarm_prev_side=%s - skipping",
+                               state.side.value, signal.prev_side.value)
                     continue
+                    
+                if state.status != OrderStatus.PENDING:
+                    logger.debug("Order not PENDING | status=%s - skipping", state.status.value)
+                    continue
+                    
                 if not state.order_id:
+                    logger.warning("Pending order has no order_id | bot_id=%s state_id=%s",
+                                 bot_id, state.id)
                     continue
+
+                logger.info("Attempting to cancel order | bot_id=%s order_id=%s symbol=%s",
+                           bot_id, state.order_id, state.symbol)
 
                 try:
                     trading = await self._trading_factory(bot)
                     await trading.cancel_order(symbol=state.symbol, order_id=int(state.order_id))
-                except Exception as exc:  # pragma: no cover - best effort, surfaces via logs
+                    logger.info("Order cancelled successfully | bot_id=%s order_id=%s",
+                              bot_id, state.order_id)
+                except Exception as exc:
                     logger.warning(
-                        "Cancel order failed | bot=%s order_id=%s disarm_reason=%s err=%s",
+                        "Cancel order failed | bot_id=%s order_id=%s disarm_reason=%s err=%s",
                         bot.id,
                         state.order_id,
                         signal.reason,
@@ -124,8 +216,15 @@ class SignalProcessor:
                     )
                     continue
 
+                logger.debug("Marking order as CANCELLED | bot_id=%s order_id=%s", bot_id, state.order_id)
                 state.mark(OrderStatus.CANCELLED)
                 await self._orders.save_state(state)
                 cancelled.append(str(state.order_id))
 
+        logger.info("DISARM signal processing complete | symbol=%s cancelled=%d/%d msg_id=%s",
+                   signal.symbol, len(cancelled), len(bot_ids), message_id)
+        
+        if cancelled:
+            logger.info("Cancelled order IDs: %s", ", ".join(cancelled))
+        
         return cancelled
