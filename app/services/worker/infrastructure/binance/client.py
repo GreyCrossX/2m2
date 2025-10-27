@@ -5,12 +5,18 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Dict, List, Optional, Tuple
 
 # ✅ Correct modular SDK imports
-from binance_sdk_derivatives_trading_usds_futures.rest_api.rest_api import (
-    AccountApi as RestAccount,
-    TradeApi as RestTrade,
-    MarketDataApi as RestMarket,
-    UserDataStreamsApi as RestUserStream,
+from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
+    DerivativesTradingUsdsFutures,
+    ConfigurationRestAPI,
+    DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL,
 )
+# Testnet constant name (present in recent versions). If your version lacks it, we’ll fallback.
+try:
+    from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
+        DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL,
+    )
+except Exception:
+    DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL = "https://testnet.binancefuture.com"
 
 
 class BinanceClient:
@@ -23,21 +29,24 @@ class BinanceClient:
         if not api_key or not api_secret:
             raise ValueError("API key and secret are required")
 
-        base_url = "https://testnet.binancefuture.com" if testnet else "https://fapi.binance.com"
-
-        # Each surface is a small client; the constructors accept base_url, api_key, api_secret, timeout
-        self._account = RestAccount(
-            api_key=api_key, api_secret=api_secret, base_url=base_url, timeout=timeout
-        )
-        self._trade = RestTrade(
-            api_key=api_key, api_secret=api_secret, base_url=base_url, timeout=timeout
-        )
-        self._market = RestMarket(base_url=base_url, timeout=timeout)
-        self._user_stream = RestUserStream(
-            api_key=api_key, api_secret=api_secret, base_url=base_url, timeout=timeout
+        base_path = (
+            DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL
+            if testnet
+            else DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL
         )
 
-        self._base_url = base_url
+        # ✅ Auth & base path live in the configuration object
+        self._conf = ConfigurationRestAPI(
+            api_key=api_key,
+            api_secret=api_secret,
+            base_path=base_path,
+            timeout=timeout,
+        )
+
+        # ✅ Single top-level client; call everything via client.rest_api
+        self._rest = DerivativesTradingUsdsFutures(config_rest_api=self._conf)
+
+        self._base_url = base_path
         self._testnet = testnet
         self._symbol_filters: Dict[str, Dict[str, Decimal]] = {}
         self._filters_lock = asyncio.Lock()
@@ -46,21 +55,23 @@ class BinanceClient:
 
     async def account(self) -> Dict:
         # GET /fapi/v2/account
-        return await asyncio.to_thread(self._account.account_information_v2)
+        return await asyncio.to_thread(self._rest.rest_api.account_information_v2)
 
     async def balance(self) -> List[Dict]:
         # GET /fapi/v2/balance
-        return await asyncio.to_thread(self._account.futures_account_balance)
+        return await asyncio.to_thread(self._rest.rest_api.futures_account_balance)
 
     async def position_risk(self, symbol: Optional[str] = None) -> List[Dict]:
         # GET /fapi/v2/positionRisk
-        return await asyncio.to_thread(self._account.position_risk, symbol=symbol)
+        return await asyncio.to_thread(self._rest.rest_api.position_risk, symbol=symbol)
 
     # ---------- Trading ----------
 
     async def change_leverage(self, symbol: str, leverage: int) -> Dict:
         # POST /fapi/v1/leverage
-        return await asyncio.to_thread(self._account.change_initial_leverage, symbol=symbol, leverage=leverage)
+        return await asyncio.to_thread(
+            self._rest.rest_api.change_initial_leverage, symbol=symbol, leverage=leverage
+        )
 
     async def new_order(
         self,
@@ -82,29 +93,29 @@ class BinanceClient:
         if timeInForce and order_type == "LIMIT":
             params["timeInForce"] = timeInForce
         params.update(kwargs)
-        return await asyncio.to_thread(self._trade.new_order, **params)
+        return await asyncio.to_thread(self._rest.rest_api.new_order, **params)
 
     async def cancel_order(self, symbol: str, orderId: int) -> Dict:
         # DELETE /fapi/v1/order
-        return await asyncio.to_thread(self._trade.cancel_order, symbol=symbol, orderId=orderId)
+        return await asyncio.to_thread(self._rest.rest_api.cancel_order, symbol=symbol, orderId=orderId)
 
     async def query_order(self, symbol: str, orderId: int) -> Dict:
         # GET /fapi/v1/order
-        return await asyncio.to_thread(self._trade.query_order, symbol=symbol, orderId=orderId)
+        return await asyncio.to_thread(self._rest.rest_api.query_order, symbol=symbol, orderId=orderId)
 
     async def get_orders(self, symbol: Optional[str] = None) -> List[Dict]:
         # GET /fapi/v1/openOrders
-        return await asyncio.to_thread(self._trade.current_open_orders, symbol=symbol)
+        return await asyncio.to_thread(self._rest.rest_api.current_open_orders, symbol=symbol)
 
     # ---------- Market data ----------
 
     async def exchange_info(self) -> Dict:
         # GET /fapi/v1/exchangeInfo
-        return await asyncio.to_thread(self._market.exchange_information)
+        return await asyncio.to_thread(self._rest.rest_api.exchange_information)
 
     async def ticker_price(self, symbol: str) -> Dict:
         # GET /fapi/v1/ticker/price
-        return await asyncio.to_thread(self._market.symbol_price_ticker, symbol=symbol)
+        return await asyncio.to_thread(self._rest.rest_api.symbol_price_ticker, symbol=symbol)
 
     # ---------- Exchange filters / quantization ----------
 
@@ -159,7 +170,6 @@ class BinanceClient:
             return value
         ratio = (value / step).to_integral_value(rounding=ROUND_DOWN)
         quantized = ratio * step
-        # Preserve the same exponent as the step to avoid representation drift
         try:
             return quantized.quantize(step)
         except Exception:
@@ -199,14 +209,14 @@ class BinanceClient:
     # ---------- User Data Stream (listen key) ----------
 
     async def new_listen_key(self) -> str:
-        data = await asyncio.to_thread(self._user_stream.start_user_data_stream)
+        data = await asyncio.to_thread(self._rest.rest_api.start_user_data_stream)
         return data.get("listenKey", "")
 
     async def keepalive_listen_key(self, listen_key: str) -> None:
-        await asyncio.to_thread(self._user_stream.keepalive_user_data_stream, listenKey=listen_key)
+        await asyncio.to_thread(self._rest.rest_api.keepalive_user_data_stream, listenKey=listen_key)
 
     async def close_listen_key(self, listen_key: str) -> None:
-        await asyncio.to_thread(self._user_stream.close_user_data_stream, listenKey=listen_key)
+        await asyncio.to_thread(self._rest.rest_api.close_user_data_stream, listenKey=listen_key)
 
     # ---------- Properties ----------
 

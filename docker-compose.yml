@@ -6,12 +6,11 @@ services:
     ports: ["6379:6379"]
     volumes: [redis-data:/data]
     healthcheck:
-      # Use redis-cli (available in the redis image), not Python.
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 60
-      start_period: 90s         # allow time for AOF to load before judging health
+      start_period: 90s
     restart: unless-stopped
 
   postgres:
@@ -30,19 +29,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-    restart: unless-stopped
-
-  pgadmin:
-    image: dpage/pgadmin4:8
-    env_file: .env
-    environment:
-      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
-      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports: ["${PGADMIN_PORT:-5050}:80"]
-    volumes: [pgadmin-data:/var/lib/pgadmin]
     restart: unless-stopped
 
   # ─────────────── DB migration ───────────────
@@ -135,32 +121,7 @@ services:
     volumes:
       - ./app/services/ingestor:/app/services/ingestor
 
-  calc:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file: .env
-    environment:
-      - PYTHONPATH=/app
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - PAIRS_1M=${PAIRS_1M:-BTCUSDT:1m,ETHUSDT:1m}
-      - PRICE_TICK_DEFAULT=${PRICE_TICK_DEFAULT:-0.01}
-      - STREAM_MAXLEN_IND=${STREAM_MAXLEN_IND:-5000}
-      - STREAM_MAXLEN_SIGNAL=${STREAM_MAXLEN_SIGNAL:-2000}
-      - STREAM_RETENTION_MS_IND=${STREAM_RETENTION_MS_IND:-0}
-      - STREAM_RETENTION_MS_SIGNAL=${STREAM_RETENTION_MS_SIGNAL:-0}
-    working_dir: /app
-    command: ["python", "-m", "services.calc.main"]
-    depends_on:
-      redis:
-        condition: service_healthy
-      ingestor:
-        condition: service_started
-    restart: unless-stopped
-    volumes:
-      - ./app:/app/app
-      - ./app/services/calc:/app/services/calc
-
+  # ─────────────── New calculator ───────────────
   calc2:
     build:
       context: .
@@ -187,125 +148,6 @@ services:
       - ./app:/app/app
       - ./app/services/calc2:/app/services/calc2
 
-  # ─────────────── Signal poller (calc → Celery) ───────────────
-  poller:
-    build:
-      context: .
-    env_file: .env
-    environment:
-      - PYTHONPATH=/app
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - POLLER_SYMBOLS=${POLLER_SYMBOLS:-BTCUSDT}
-      - POLLER_POLL_INTERVAL=${POLLER_POLL_INTERVAL:-1}
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
-    working_dir: /app
-    command: ["/bin/sh", "-lc", "/app/scripts/run_poller.sh ${POLLER_SYMBOLS}"]
-    depends_on:
-      redis:
-        condition: service_healthy
-      calc2:
-        condition: service_started
-    restart: unless-stopped
-    volumes:
-      - ./app:/app/app
-      - ./app/services:/app/services
-      - ./app/scripts:/app/scripts
-
-  # ─────────────── Celery workers ───────────────
-  worker-signals:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file: .env
-    environment:
-      - PYTHONPATH=/app
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - TZ=UTC
-      - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
-      - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
-      - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
-      - CREDENTIALS_MASTER_KEY=${CREDENTIALS_MASTER_KEY}
-      - DRY_RUN_MODE=${DRY_RUN_MODE:-true}
-      - DATABASE_URL=${DATABASE_URL}
-    working_dir: /app
-    command: ["/bin/sh", "-c", "/app/scripts/run_worker_signals.sh"]
-    depends_on:
-      redis:
-        condition: service_healthy
-      app:
-        condition: service_started
-    restart: unless-stopped
-    volumes:
-      - ./app:/app/app
-      - ./app/services:/app/services
-      - ./app/scripts:/app/scripts
-
-  worker-reconcile:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file: .env
-    environment:
-      - PYTHONPATH=/app
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - TZ=UTC
-      - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
-      - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
-      - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
-      - CREDENTIALS_MASTER_KEY=${CREDENTIALS_MASTER_KEY}
-      - DRY_RUN_MODE=${DRY_RUN_MODE:-true}
-      - DATABASE_URL=${DATABASE_URL}
-    working_dir: /app
-    command: ["/bin/sh", "-c", "/app/scripts/run_worker_reconcile.sh"]
-    depends_on:
-      redis:
-        condition: service_healthy
-      app:
-        condition: service_started
-    restart: unless-stopped
-    volumes:
-      - ./app:/app/app
-      - ./app/services:/app/services
-      - ./app/scripts:/app/scripts
-
-  # Optional: Celery Beat
-  beat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file: .env
-    environment:
-      - PYTHONPATH=/app
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - TZ=UTC
-      - RECONCILE_SYMBOLS=${RECONCILE_SYMBOLS}
-      - RECONCILE_INTERVAL_SECONDS=${RECONCILE_INTERVAL_SECONDS:-45}
-      - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
-      - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
-      - BINANCE_USDSF_BASE_URL=${BINANCE_USDSF_BASE_URL}
-      - CREDENTIALS_MASTER_KEY=${CREDENTIALS_MASTER_KEY}
-      - DRY_RUN_MODE=${DRY_RUN_MODE:-true}
-      - DATABASE_URL=${DATABASE_URL}
-    working_dir: /app
-    command: ["/bin/sh", "-c", "/app/scripts/run_beat.sh"]
-    depends_on:
-      redis:
-        condition: service_healthy
-      app:
-        condition: service_started
-    restart: unless-stopped
-    volumes:
-      - ./app:/app/app
-      - ./app/services:/app/services
-      - ./app/scripts:/app/scripts
-
   # ─────────────── Worker (new service) ───────────────
   worker:
     build:
@@ -329,9 +171,8 @@ services:
       - ROUTER_REFRESH_SECONDS=${WORKER_ROUTER_REFRESH_SECONDS:-60}
       # ---- Balance cache ----
       - BALANCE_TTL_SECONDS=${WORKER_BALANCE_TTL_SECONDS:-30}
-      # ---- Binance connector (modular by default) ----
+      # ---- Binance connector ----
       - BINANCE_CONNECTOR=${BINANCE_CONNECTOR:-modular}
-      # Optional defaults (per-bot creds still from DB)
       - BINANCE_USDSF_API_KEY=${BINANCE_USDSF_API_KEY}
       - BINANCE_USDSF_API_SECRET=${BINANCE_USDSF_API_SECRET}
       # ---- Crypto for decrypting DB creds ----
@@ -340,7 +181,7 @@ services:
     command: ["python", "-u", "-m", "services.worker.main"]
     depends_on:
       redis:
-        condition: service_started    # let worker self-wait for PONG
+        condition: service_started
       postgres:
         condition: service_healthy
       migrate:
@@ -358,4 +199,3 @@ services:
 volumes:
   redis-data:
   pg-data:
-  pgadmin-data:
