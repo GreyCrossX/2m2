@@ -25,6 +25,7 @@ from app.services.infrastructure.binance import (
     BinanceTrading,
 )
 from .infrastructure.cache.balance_cache import BalanceCache
+from .infrastructure.metrics import WorkerMetrics
 from .infrastructure.postgres.order_states import OrderGateway
 from .infrastructure.postgres.repositories import BotRepository, CredentialRepository
 from .infrastructure.postgres.session import create_session_factory
@@ -171,11 +172,15 @@ async def main_async() -> None:
         timeframe=cfg.timeframe,
         block_ms=cfg.stream_block_ms,
         start_from_latest=True,
-        use_consumer_group=False,
-        persist_offsets=True,
+        use_consumer_group=True,
+        consumer_group=f"cg:worker:signal|{cfg.timeframe}",
+        consumer_name=cfg.service_name,
+        persist_offsets=False,
         catchup_threshold_ms=cfg.catchup_threshold_ms,
     )
     log.info("Signal stream consumer created")
+
+    metrics = WorkerMetrics()
 
     log.info("Creating worker poller (router refresh: %ds)...", cfg.router_refresh_seconds)
     poller = WorkerPoller(
@@ -184,6 +189,8 @@ async def main_async() -> None:
         signal_processor=signal_processor,
         router=router,
         bot_repository=bot_repo,
+        redis=redis,
+        metrics=metrics,
         router_refresh_seconds=cfg.router_refresh_seconds,
     )
 

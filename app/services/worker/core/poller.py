@@ -3,88 +3,133 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
+
+from redis.asyncio import Redis
 
 from ..application.signal_processor import SignalProcessor
+from ..core.logging_utils import ensure_log_context, format_log_context
 from ..domain.enums import SignalType
 from ..domain.exceptions import InvalidSignalException
-from ..domain.models import ArmSignal, DisarmSignal, BotConfig
+from ..domain.models import ArmSignal, DisarmSignal
+from ..infrastructure.metrics import WorkerMetrics
 from ..infrastructure.postgres.repositories import BotRepository
-from ..infrastructure.redis.stream_consumer import SignalStreamConsumer
+from ..infrastructure.redis.stream_consumer import SignalStreamConsumer, StreamMessage
 from .router import SymbolRouter
-
 
 logger = logging.getLogger(__name__)
 
 
 class WorkerPoller:
-    """
-    Main loop:
-      - Load enabled bots and build router
-      - Start consuming Calc signals from Redis
-      - Parse ARM/DISARM and hand off to SignalProcessor
-      - Periodically reload bots
-    """
+    """Consume Redis stream signals and delegate to the SignalProcessor."""
 
     def __init__(
         self,
-        config,  # Config object (expects: timeframe, router_refresh_seconds (opt))
+        config,
         stream_consumer: SignalStreamConsumer,
         signal_processor: SignalProcessor,
         router: SymbolRouter,
         bot_repository: BotRepository,
         *,
+        redis: Redis,
+        metrics: WorkerMetrics,
         router_refresh_seconds: Optional[int] = None,
-    ):
+        dedupe_ttl_seconds: int = 300,
+    ) -> None:
         self._cfg = config
         self._consumer = stream_consumer
         self._sp = signal_processor
         self._router = router
         self._bots = bot_repository
+        self._redis = redis
+        self._metrics = metrics
         self._running = False
         self._reload_task: Optional[asyncio.Task] = None
         self._router_refresh_seconds = router_refresh_seconds or getattr(config, "router_refresh_seconds", 60)
+        self._dedupe_ttl = max(dedupe_ttl_seconds, 1)
+        self._pending_idle_ms = self._dedupe_ttl * 1000
+        self._ack_attempts: Dict[Tuple[str, str], int] = {}
+        self._ack_history: Dict[Tuple[str, str], int] = {}
+        self._router_fp: Optional[int] = None
 
     async def start(self) -> None:
-        """
-        1) Load enabled bots
-        2) Build router subscriptions
-        3) Start background router refresher
-        4) Start consuming signals
-        """
+        """Load bots, warm the router, and begin the consume loop."""
         self._running = True
         logger.info("Loading enabled bots from database...")
         await self._reload_bots()
 
-        # background refresher
-        logger.info("Starting background router refresher (interval=%ds)...", self._router_refresh_seconds)
-        self._reload_task = asyncio.create_task(self._reload_bots_periodically(), name="router_refresher")
+        with contextlib.suppress(Exception):
+            await self._consumer.cleanup_stale_pending(idle_ms=self._pending_idle_ms, limit=100)
 
-        logger.info("WorkerPoller started | bots=%d symbols=%s",
-                    len(self._router), ",".join(self._router.symbols()))
-        
+        logger.info(
+            "Starting background router refresher (interval=%ds)...",
+            self._router_refresh_seconds,
+        )
+        self._reload_task = asyncio.create_task(
+            self._reload_bots_periodically(),
+            name="router_refresher",
+        )
+
+        logger.info(
+            "WorkerPoller started | subs=%d symbols=%s",
+            len(self._router),
+            ",".join(self._router.symbols()),
+        )
+
         logger.info("Beginning signal consumption loop...")
-        signal_count = 0
-        
-        # main consume loop
-        async for sym, tf, payload, msg_id in self._consumer.consume():
+        async for message in self._consumer.consume():
             if not self._running:
                 logger.info("Poller stopped flag set, breaking consume loop")
                 break
-            
-            signal_count += 1
-            logger.info("Received signal #%d | sym=%s tf=%s msg_id=%s type=%s", 
-                    signal_count, sym, tf, msg_id, payload.get('type', 'unknown'))
-            
+
+            log_context = self._build_log_context(message)
+            logger.info("Received signal | %s", format_log_context(log_context))
+
+            dedupe_key = self._dedupe_key(message.stream_key, message.message_id)
+            acquired = await self._acquire_dedupe(dedupe_key, log_context)
+            if not acquired:
+                self._metrics.inc_duplicate()
+                self._warn_redelivery(message.stream_key, message.message_id, log_context)
+                logger.info("Duplicate signal skipped | %s", format_log_context(log_context))
+                ack_ok = await self._ack_message(message, log_context)
+                if not ack_ok:
+                    self._metrics.inc_ack_failed()
+                    await self._consumer.cleanup_stale_pending(idle_ms=self._pending_idle_ms, limit=50)
+                self._ack_history.pop((message.stream_key, message.message_id), None)
+                continue
+
             try:
-                await self._process_signal(sym, tf, payload, msg_id)
-                logger.info("Signal #%d processed successfully | sym=%s msg_id=%s", 
-                        signal_count, sym, msg_id)
+                updated_context = await self._process_signal(message, log_context)
+                log_context = updated_context
+                self._metrics.inc_processed(status="success")
+                logger.info(
+                    "Signal processed successfully | sym=%s tf=%s type=%s msg_id=%s prev_side=%s",
+                    log_context.get("symbol", "-"),
+                    log_context.get("tf", "-"),
+                    log_context.get("type", "-"),
+                    log_context.get("msg_id", "-"),
+                    log_context.get("prev_side", "-"),
+                )
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                logger.error("Signal processing error | sym=%s tf=%s msg_id=%s err=%s",
-                             sym, tf, msg_id, e, exc_info=True)
+            except Exception as exc:
+                self._metrics.inc_processed(status="error")
+                logger.error(
+                    "Signal processing error | %s err=%s",
+                    format_log_context(log_context),
+                    exc,
+                    exc_info=True,
+                )
+                with contextlib.suppress(Exception):
+                    await self._redis.delete(dedupe_key)
+                continue
+
+            ack_ok = await self._ack_message(message, log_context)
+            if not ack_ok:
+                self._metrics.inc_ack_failed()
+                await self._consumer.cleanup_stale_pending(idle_ms=self._pending_idle_ms, limit=50)
+                with contextlib.suppress(Exception):
+                    await self._redis.delete(dedupe_key)
 
     async def stop(self) -> None:
         """Graceful shutdown for background tasks."""
@@ -100,71 +145,109 @@ class WorkerPoller:
 
     async def _process_signal(
         self,
-        symbol: str,
-        timeframe: str,
-        signal_data: Dict,
-        message_id: str,
-    ) -> None:
-        """
-        Parse & delegate to SignalProcessor.
-        """
-        t = str(signal_data.get("type", "")).lower()
-        logger.debug("Parsing signal | type=%s sym=%s tf=%s msg_id=%s", t, symbol, timeframe, message_id)
-        
-        if t == SignalType.ARM.value:
-            try:
-                signal = ArmSignal.from_stream(signal_data)
-                logger.info("Parsed ARM signal | sym=%s side=%s trigger=%s stop=%s", 
-                          signal.symbol, signal.side.value, signal.trigger, signal.stop)
-            except Exception as e:
-                logger.error("Failed to parse ARM signal | data=%s err=%s", signal_data, e)
-                raise InvalidSignalException(f"Invalid ARM signal: {e}") from e
-            
-            await self._sp.process_arm_signal(signal, message_id)
-            logger.debug("Processed ARM | sym=%s tf=%s msg=%s", symbol, timeframe, message_id)
+        message: StreamMessage,
+        log_context: Dict[str, str],
+    ) -> Dict[str, str]:
+        """Parse the payload and invoke the appropriate SignalProcessor handler."""
+        payload = message.payload
+        symbol = message.symbol
+        timeframe = message.timeframe
+        msg_id = message.message_id
+        msg_type = str(payload.get("type", "")).lower()
 
-        elif t == SignalType.DISARM.value:
-            try:
-                signal = DisarmSignal.from_stream(signal_data)
-                logger.info("Parsed DISARM signal | sym=%s prev_side=%s reason=%s", 
-                          signal.symbol, signal.prev_side.value, signal.reason)
-            except Exception as e:
-                logger.error("Failed to parse DISARM signal | data=%s err=%s", signal_data, e)
-                raise InvalidSignalException(f"Invalid DISARM signal: {e}") from e
-            
-            await self._sp.process_disarm_signal(signal, message_id)
-            logger.debug("Processed DISARM | sym=%s tf=%s msg=%s", symbol, timeframe, message_id)
+        logger.debug("Parsing signal | %s", format_log_context(log_context))
 
-        else:
-            logger.error("Unknown signal type | type=%s data=%s", t, signal_data)
-            raise InvalidSignalException(f"Unknown signal type '{t}'")
+        if msg_type == SignalType.ARM.value:
+            try:
+                signal = ArmSignal.from_stream(payload)
+                log_context = ensure_log_context(log_context, type=signal.type.value)
+                logger.info(
+                    "Parsed ARM signal | side=%s trigger=%s stop=%s | %s",
+                    signal.side.value,
+                    signal.trigger,
+                    signal.stop,
+                    format_log_context(log_context),
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to parse ARM signal | err=%s | %s",
+                    exc,
+                    format_log_context(log_context),
+                )
+                raise InvalidSignalException(f"Invalid ARM signal: {exc}") from exc
+
+            await self._sp.process_arm_signal(signal, msg_id, log_context)
+            logger.debug("Processed ARM | %s", format_log_context(log_context))
+            return log_context
+
+        if msg_type == SignalType.DISARM.value:
+            try:
+                signal = DisarmSignal.from_stream(payload)
+                log_context = ensure_log_context(
+                    log_context,
+                    type=signal.type.value,
+                    prev_side=signal.prev_side.value,
+                )
+                logger.info(
+                    "Parsed DISARM signal | prev_side=%s reason=%s | %s",
+                    signal.prev_side.value,
+                    signal.reason,
+                    format_log_context(log_context),
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to parse DISARM signal | err=%s | %s",
+                    exc,
+                    format_log_context(log_context),
+                )
+                raise InvalidSignalException(f"Invalid DISARM signal: {exc}") from exc
+
+            await self._sp.process_disarm_signal(signal, msg_id, log_context)
+            logger.debug("Processed DISARM | %s", format_log_context(log_context))
+            return log_context
+
+        logger.error("Unknown signal type | type=%s data=%s", msg_type, payload)
+        raise InvalidSignalException(f"Unknown signal type '{msg_type}'")
 
     async def _reload_bots(self) -> None:
-        """
-        Pull fresh enabled bots and rebuild router mappings.
-        """
+        """Pull fresh enabled bots and rebuild router mappings if changed."""
         logger.info("Fetching enabled bots from database...")
         bots = await self._bots.get_enabled_bots()
         logger.info("Found %d enabled bot(s)", len(bots))
-        
+
         if bots:
             for bot in bots:
-                logger.info("  Bot: id=%s user=%s symbol=%s tf=%s side=%s leverage=%dx env=%s",
-                        bot.id, bot.user_id, bot.symbol, bot.timeframe, 
-                        bot.side_whitelist.value, bot.leverage, bot.env)
+                logger.info(
+                    "  Bot: id=%s user=%s symbol=%s tf=%s side=%s leverage=%dx env=%s",
+                    bot.id,
+                    bot.user_id,
+                    bot.symbol,
+                    bot.timeframe,
+                    bot.side_whitelist.value,
+                    bot.leverage,
+                    bot.env,
+                )
         else:
             logger.warning("No enabled bots found in database")
-        
-        # BotRepository returns Domain BotConfig (per our infra impl)
-        logger.info("Rebuilding router subscriptions...")
-        self._router.reload_subscriptions(bots)
-        logger.info("Router rebuilt | subs=%d symbols=%s",
-                    len(self._router), ",".join(self._router.symbols()))
+
+        fingerprint = hash(
+            tuple(sorted((str(b.id), b.symbol.upper(), b.timeframe) for b in bots))
+        )
+        if fingerprint != self._router_fp:
+            logger.info("Rebuilding router subscriptions...")
+            self._router.reload_subscriptions(bots)
+            self._router_fp = fingerprint
+            symbols_str = ",".join(sorted({b.symbol.upper() for b in bots})) if bots else "-"
+            logger.info(
+                "Router rebuilt | subs=%d symbols=%s",
+                len(self._router),
+                symbols_str,
+            )
+        else:
+            logger.debug("Router fingerprint unchanged | subs=%d", len(self._router))
 
     async def _reload_bots_periodically(self) -> None:
-        """
-        Periodically refresh router subscriptions to reflect DB changes.
-        """
+        """Periodically refresh router subscriptions to reflect DB changes."""
         logger.info("Router refresher started (interval=%ds)", self._router_refresh_seconds)
         try:
             while self._running:
@@ -172,7 +255,75 @@ class WorkerPoller:
                 try:
                     logger.debug("Performing scheduled router refresh...")
                     await self._reload_bots()
-                except Exception as e:
-                    logger.error("Router refresh error | err=%s", e, exc_info=True)
+                except Exception as exc:
+                    logger.error("Router refresh error | err=%s", exc, exc_info=True)
         except asyncio.CancelledError:
             logger.info("Router refresher cancelled")
+
+    def _build_log_context(self, message: StreamMessage) -> Dict[str, str]:
+        payload_type = str(message.payload.get("type", "")).lower()
+        prev_side = str(message.payload.get("prev_side", "-") or "-")
+        return {
+            "symbol": message.symbol,
+            "tf": message.timeframe,
+            "type": payload_type,
+            "msg_id": message.message_id,
+            "prev_side": prev_side,
+        }
+
+    async def _acquire_dedupe(self, key: str, context: Dict[str, str]) -> bool:
+        try:
+            result = await self._redis.set(key, "1", nx=True, ex=self._dedupe_ttl)
+            return bool(result)
+        except Exception as exc:
+            logger.error(
+                "Deduplication guard error | key=%s err=%s | %s",
+                key,
+                exc,
+                format_log_context(context),
+                exc_info=True,
+            )
+            return True
+
+    async def _ack_message(self, message: StreamMessage, context: Dict[str, str]) -> bool:
+        key = (message.stream_key, message.message_id)
+        attempts = self._ack_attempts.get(key, 0) + 1
+        self._ack_attempts[key] = attempts
+
+        acked = await self._consumer.ack(message.stream_key, message.message_id)
+        last_ack = self._consumer.last_ack(message.stream_key)
+        if acked:
+            if attempts > 1:
+                self._ack_history[key] = attempts
+            else:
+                self._ack_history.pop(key, None)
+            self._ack_attempts.pop(key, None)
+            logger.debug(
+                "ACK success | attempts=%d last_ack=%s | %s",
+                attempts,
+                last_ack or "-",
+                format_log_context(context),
+            )
+            return True
+
+        logger.error(
+            "ACK failed | attempts=%d last_ack=%s | %s",
+            attempts,
+            last_ack or "-",
+            format_log_context(context),
+        )
+        return False
+
+    def _warn_redelivery(self, stream_key: str, msg_id: str, context: Dict[str, str]) -> None:
+        key = (stream_key, msg_id)
+        attempts = max(self._ack_attempts.get(key, 0), self._ack_history.get(key, 0))
+        if attempts > 1:
+            logger.warning(
+                "Message re-delivered after %d ACK attempt(s) | %s",
+                attempts,
+                format_log_context(context),
+            )
+
+    @staticmethod
+    def _dedupe_key(stream_key: str, msg_id: str) -> str:
+        return f"dedupe:{stream_key}:{msg_id}"

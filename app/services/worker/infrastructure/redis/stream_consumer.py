@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import AsyncIterator, Dict, List, Mapping, Optional, Tuple
 
@@ -13,6 +14,15 @@ from .keys import stream_signal, offset_key
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class StreamMessage:
+    stream_key: str
+    symbol: str
+    timeframe: str
+    payload: Dict
+    message_id: str
 
 
 class SignalStreamConsumer:
@@ -92,19 +102,21 @@ class SignalStreamConsumer:
 
         # Internal state:
         # XREAD: stream_key -> last_id
-        self._streams_last_id: Dict[str, str] = {}
+        self._streams_last_id: Dict[str | bytes, str] = {}
         # Calculated stream keys
         self._stream_keys: List[str] = [stream_signal(sym, self._tf) for sym in self._symbols]
+        # Track last ACKed id per stream for observability
+        self._last_ack_by_stream: Dict[str, str] = {}
 
     # ---------------------------------------------------------------------
     # Public API
     # ---------------------------------------------------------------------
 
-    async def consume(self) -> AsyncIterator[Tuple[str, str, Dict, str]]:
+    async def consume(self) -> AsyncIterator[StreamMessage]:
         """
-        Yields (symbol, timeframe, payload, message_id).
+        Yield StreamMessage objects containing parsed payloads and metadata.
 
-        In Consumer Group mode, messages are ACKed after yielding (best-effort).
+        In Consumer Group mode, callers are responsible for ACKing via ``ack``.
         In XREAD mode, last offsets are persisted (if enabled) as they are consumed.
         """
         await self._prepare()
@@ -210,29 +222,41 @@ class SignalStreamConsumer:
                 total_entries = sum(len(entries) for _, entries in result)
                 logger.debug("XREAD returned %d stream(s) with %d total entries", len(result), total_entries)
 
-                for stream_key, entries in result:
+                for raw_stream_key, entries in result:
+                    stream_key = self._normalize_stream_key(raw_stream_key)
                     logger.debug("Processing %d entries from stream: %s", len(entries), stream_key)
-                    
-                    for msg_id, fields in entries:
+
+                    for raw_msg_id, fields in entries:
+                        msg_id = self._normalize_msg_id(raw_msg_id)
                         payload = self._parse(fields)
                         # Staleness check (uses payload["ts"] in epoch ms if present)
                         if self._is_stale(payload, self._catchup_ms):
                             # Advance offset & persist, but skip delivering the message
                             logger.debug("Skipping stale message | stream=%s msg_id=%s", stream_key, msg_id)
-                            self._streams_last_id[stream_key] = msg_id
+                            self._update_last_id(raw_stream_key, msg_id)
                             if self._persist_offsets:
                                 await self._save_offset(stream_key, msg_id)
                             continue
 
                         sym, tf = self._split_stream_key(stream_key)
                         # Advance offset & persist
-                        self._streams_last_id[stream_key] = msg_id
+                        self._update_last_id(raw_stream_key, msg_id)
                         if self._persist_offsets:
                             await self._save_offset(stream_key, msg_id)
 
-                        logger.debug("Yielding message | stream=%s msg_id=%s type=%s", 
-                                   stream_key, msg_id, payload.get('type', 'unknown'))
-                        yield sym, tf, payload, msg_id
+                        logger.debug(
+                            "Yielding message | stream=%s msg_id=%s type=%s",
+                            stream_key,
+                            msg_id,
+                            payload.get('type', 'unknown'),
+                        )
+                        yield StreamMessage(
+                            stream_key=stream_key,
+                            symbol=sym,
+                            timeframe=tf,
+                            payload=payload,
+                            message_id=msg_id,
+                        )
 
             except asyncio.CancelledError:
                 logger.info("XREAD consume loop cancelled")
@@ -246,14 +270,13 @@ class SignalStreamConsumer:
     # Consumer Group mode
     # ---------------------------------------------------------------------
 
-    async def _consume_cg(self) -> AsyncIterator[Tuple[str, str, Dict, str]]:
+    async def _consume_cg(self) -> AsyncIterator[StreamMessage]:
         """
         Uses XREADGROUP against all tracked streams with the same consumer group.
-        ACKs after yielding (best-effort).
         """
-        logger.info("Starting XREADGROUP consume loop | group=%s consumer=%s streams=%d", 
+        logger.info("Starting XREADGROUP consume loop | group=%s consumer=%s streams=%d",
                    self._group, self._consumer, len(self._stream_keys))
-        
+
         iteration = 0
         while True:
             iteration += 1
@@ -277,29 +300,42 @@ class SignalStreamConsumer:
                 total_entries = sum(len(entries) for _, entries in result)
                 logger.debug("XREADGROUP returned %d stream(s) with %d total entries", len(result), total_entries)
 
-                for stream_key, entries in result:
+                for raw_stream_key, entries in result:
+                    stream_key = self._normalize_stream_key(raw_stream_key)
                     logger.debug("Processing %d entries from stream: %s", len(entries), stream_key)
-                    
-                    for msg_id, fields in entries:
+
+                    for raw_msg_id, fields in entries:
+                        msg_id = self._normalize_msg_id(raw_msg_id)
                         payload = self._parse(fields)
 
                         # Staleness check: ACK and skip if stale
                         if self._is_stale(payload, self._catchup_ms):
-                            logger.debug("Skipping stale message (ACKing) | stream=%s msg_id=%s", stream_key, msg_id)
+                            logger.debug(
+                                "Skipping stale message (ACKing) | stream=%s msg_id=%s",
+                                stream_key,
+                                msg_id,
+                            )
                             with contextlib.suppress(Exception):
-                                await self._redis.xack(stream_key, self._group, msg_id)
+                                acked = await self._redis.xack(stream_key, self._group, msg_id)
+                                if acked:
+                                    self._last_ack_by_stream[stream_key] = msg_id
                             continue
 
                         sym, tf = self._split_stream_key(stream_key)
-                        
-                        logger.debug("Yielding message | stream=%s msg_id=%s type=%s", 
-                                   stream_key, msg_id, payload.get('type', 'unknown'))
-                        yield sym, tf, payload, msg_id
 
-                        # ACK after yielding (best-effort)
-                        with contextlib.suppress(Exception):
-                            await self._redis.xack(stream_key, self._group, msg_id)
-                            logger.debug("ACKed message | stream=%s msg_id=%s", stream_key, msg_id)
+                        logger.debug(
+                            "Yielding message | stream=%s msg_id=%s type=%s",
+                            stream_key,
+                            msg_id,
+                            payload.get('type', 'unknown'),
+                        )
+                        yield StreamMessage(
+                            stream_key=stream_key,
+                            symbol=sym,
+                            timeframe=tf,
+                            payload=payload,
+                            message_id=msg_id,
+                        )
 
             except asyncio.CancelledError:
                 logger.info("XREADGROUP consume loop cancelled")
@@ -307,6 +343,83 @@ class SignalStreamConsumer:
             except Exception as e:
                 logger.error("XREADGROUP error (will retry after 0.5s) | err=%s", e, exc_info=True)
                 await asyncio.sleep(0.5)
+
+    async def ack(self, stream_key: str, msg_id: str) -> bool:
+        """ACK a message for the configured consumer group."""
+        if not self._use_cg:
+            return True
+        try:
+            acked = await self._redis.xack(stream_key, self._group, msg_id)
+        except Exception as exc:
+            logger.error(
+                "XACK error | stream=%s msg_id=%s err=%s",
+                stream_key,
+                msg_id,
+                exc,
+                exc_info=True,
+            )
+            return False
+        if acked:
+            self._last_ack_by_stream[stream_key] = msg_id
+            logger.debug("ACKed message | stream=%s msg_id=%s", stream_key, msg_id)
+            return True
+        logger.debug("XACK returned 0 | stream=%s msg_id=%s", stream_key, msg_id)
+        return False
+
+    async def cleanup_stale_pending(self, idle_ms: int = 300_000, limit: int = 50) -> Dict[str, int]:
+        """Best-effort cleanup of stale pending entries for all tracked streams."""
+        cleaned: Dict[str, int] = {}
+        if not self._use_cg:
+            return cleaned
+
+        for stream_key in self._stream_keys:
+            try:
+                pending = await self._redis.xpending_range(
+                    stream_key,
+                    self._group,
+                    min="-",
+                    max="+",
+                    count=limit,
+                    idle=idle_ms,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "XPENDING cleanup skipped | stream=%s err=%s",
+                    stream_key,
+                    exc,
+                )
+                continue
+
+            if not pending:
+                continue
+
+            stale_ids = [entry["message_id"] for entry in pending if entry.get("idle", 0) >= idle_ms]
+            if not stale_ids:
+                continue
+
+            try:
+                acked = await self._redis.xack(stream_key, self._group, *stale_ids)
+                if acked:
+                    cleaned[stream_key] = acked
+                    self._last_ack_by_stream[stream_key] = stale_ids[-1]
+                    logger.info(
+                        "Cleaned %d stale pending entries | stream=%s last_id=%s",
+                        acked,
+                        stream_key,
+                        stale_ids[-1],
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to clean pending entries | stream=%s err=%s",
+                    stream_key,
+                    exc,
+                )
+
+        return cleaned
+
+    def last_ack(self, stream_key: str) -> Optional[str]:
+        """Return the last ACKed id (if any) for the given stream."""
+        return self._last_ack_by_stream.get(stream_key)
 
     # ---------------------------------------------------------------------
     # Offsets (XREAD mode only)
@@ -360,6 +473,25 @@ class SignalStreamConsumer:
             with contextlib.suppress(Exception):
                 return json.loads(decoded["json"])
         return decoded
+
+    def _normalize_stream_key(self, stream_key: str | bytes) -> str:
+        if isinstance(stream_key, (bytes, bytearray)):
+            with contextlib.suppress(Exception):
+                return stream_key.decode()
+            return str(stream_key)
+        return str(stream_key)
+
+    @staticmethod
+    def _normalize_msg_id(msg_id: str | bytes) -> str:
+        if isinstance(msg_id, (bytes, bytearray)):
+            with contextlib.suppress(Exception):
+                return msg_id.decode()
+            return str(msg_id)
+        return str(msg_id)
+
+    def _update_last_id(self, stream_key: str | bytes, msg_id: str) -> None:
+        key = stream_key if stream_key in self._streams_last_id else self._normalize_stream_key(stream_key)
+        self._streams_last_id[key] = msg_id
 
     @staticmethod
     def _split_stream_key(stream_key: str) -> Tuple[str, str]:
