@@ -125,6 +125,7 @@ async def main_async() -> None:
                 api_key=api_key,
                 api_secret=api_secret,
                 testnet=(env.lower() == "testnet"),
+                timeout=30
             )
             client_cache[key] = client
             log.info("Binance client created and cached | cred_id=%s env=%s testnet=%s", 
