@@ -18,7 +18,6 @@ BASE_CFG = {
     "tp_ratio": Decimal("1.5"),
 }
 
-@pytest.mark.unit
 def test_build_plan_no_balance_returns_not_ok(fake_redis, monkeypatch):
     d = _load_domain()
     # zero balance
@@ -38,7 +37,6 @@ def test_build_plan_no_balance_returns_not_ok(fake_redis, monkeypatch):
     assert plan["ok"] is False
     assert "sizing" in plan["diagnostics"]
 
-@pytest.mark.unit
 def test_build_plan_happy_path(fake_redis, monkeypatch):
     d = _load_domain()
     # stub balance and filters
@@ -65,7 +63,6 @@ def test_build_plan_happy_path(fake_redis, monkeypatch):
     assert "brackets" in plan
     assert plan["tp_price"] is not None
 
-@pytest.mark.unit
 def test_build_plan_clamps_to_max_qty(fake_redis, monkeypatch):
     d = _load_domain()
     cfg = dict(BASE_CFG, max_qty=Decimal("0.05"))

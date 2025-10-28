@@ -10,7 +10,6 @@ def _load_state_module():
     state_mod = importlib.import_module("app.services.tasks.state")
     return state_mod
 
-@pytest.mark.unit
 def test_config_roundtrip(fake_redis):
     state = _load_state_module()
     cfg = {
@@ -34,7 +33,6 @@ def test_config_roundtrip(fake_redis):
     assert got["tp_ratio"] == Decimal("1.5")
     assert got["max_qty"] == Decimal("0.25")
 
-@pytest.mark.unit
 def test_state_roundtrip(fake_redis):
     state = _load_state_module()
     st = {
@@ -54,7 +52,6 @@ def test_state_roundtrip(fake_redis):
     assert got["position_qty"] == Decimal("0.15")
     assert got["avg_entry_price"] == Decimal("100.5")
 
-@pytest.mark.unit
 def test_idempotency_set(fake_redis):
     state = _load_state_module()
     sid = "BTCUSDT:999:long"
@@ -65,7 +62,6 @@ def test_idempotency_set(fake_redis):
     all_ids = state.list_processed_signals(BOT_ID)
     assert sid in all_ids
 
-@pytest.mark.unit
 def test_open_order_tracking(fake_redis):
     state = _load_state_module()
     assert state.track_open_order(BOT_ID, "a1") == 1

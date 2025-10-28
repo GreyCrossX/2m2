@@ -11,7 +11,6 @@ BASE_FILTERS = {
     "min_notional": Decimal("5"),
 }
 
-@pytest.mark.unit
 class TestPayloadBuilders:
     def test_build_entry_order_with_filters(self):
         out = build_entry_order(

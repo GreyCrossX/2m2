@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from app.infrastructure.exchange.binance_usds import BinanceUSDS, BinanceUSDSConfig
+from app.services.infrastructure.binance import BinanceUSDS, BinanceUSDSConfig
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

@@ -1,9 +1,9 @@
+"""Synchronous Binance USDⓈ-M futures client with retries and normalization."""
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass
-
 from typing import Any, Callable, Mapping
 
 import requests
@@ -14,33 +14,37 @@ from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futur
     DerivativesTradingUsdsFutures,
 )
 
-try:  # pragma: no cover - fallback for SDKs missing the constant
+try:  # pragma: no cover - defensive import
     from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
         DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL,
     )
 except Exception:  # pragma: no cover
     DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL = "https://testnet.binancefuture.com"
 
-from app.services.worker.domain.exceptions import (
+from app.services.domain.exceptions import (
     DomainAuthError,
     DomainBadRequest,
     DomainExchangeDown,
     DomainRateLimit,
 )
 
-log = logging.getLogger("infrastructure.exchange.binance_usds")
+logger = logging.getLogger("services.infrastructure.binance.binance_usds")
 
 
 @dataclass(slots=True)
 class BinanceUSDSConfig:
+    """Configuration for :class:`BinanceUSDS`."""
+
     api_key: str
     api_secret: str
     testnet: bool = False
     timeout_ms: int = 5000
+    max_retries: int = 3
+    backoff_factor: float = 0.5
 
 
 class BinanceUSDS:
-    """Thin synchronous adapter over the modular Binance USDⓈ-M futures SDK."""
+    """Thin synchronous adapter over the Binance USDⓈ-M futures REST API."""
 
     _ORDER_PARAM_ALIASES: Mapping[str, str] = {
         "timeInForce": "time_in_force",
@@ -99,6 +103,8 @@ class BinanceUSDS:
 
         self._timeout_ms = config.timeout_ms
         self._base_path = base_path
+        self._max_retries = max(0, int(config.max_retries))
+        self._backoff_factor = float(config.backoff_factor)
 
     # ------------------------------------------------------------------
     # Normalisation helpers
@@ -124,32 +130,55 @@ class BinanceUSDS:
     def _normalize_response(self, resp: Any) -> Any:
         if resp is None:
             return None
-        data = resp
-        data_attr = getattr(resp, "data", None)
-        if callable(data_attr):
-            data = data_attr()
-        elif data_attr is not None:
-            data = data_attr
+        if hasattr(resp, "data"):
+            data_attr = getattr(resp, "data")
+            data = data_attr() if callable(data_attr) else data_attr
+        elif isinstance(resp, (dict, list)):
+            data = resp
+        else:
+            data = resp
         return self._normalize_value(data)
 
     # ------------------------------------------------------------------
     # Error mapping & retries
     # ------------------------------------------------------------------
     def _map_exception(self, exc: Exception) -> Exception:
-        if isinstance(exc, (binance_errors.BadRequestError, binance_errors.RequiredError, binance_errors.ClientError)):
+        if isinstance(
+            exc,
+            (
+                binance_errors.BadRequestError,
+                binance_errors.RequiredError,
+                binance_errors.ClientError,
+            ),
+        ):
             return DomainBadRequest(str(exc))
-        if isinstance(exc, (binance_errors.UnauthorizedError, binance_errors.ForbiddenError)):
+        if isinstance(
+            exc, (binance_errors.UnauthorizedError, binance_errors.ForbiddenError)
+        ):
             return DomainAuthError(str(exc))
-        if isinstance(exc, (binance_errors.TooManyRequestsError, binance_errors.RateLimitBanError)):
+        if isinstance(
+            exc,
+            (
+                binance_errors.TooManyRequestsError,
+                binance_errors.RateLimitBanError,
+            ),
+        ):
             return DomainRateLimit(str(exc))
-        if isinstance(exc, (binance_errors.ServerError, binance_errors.NetworkError)):
+        if isinstance(
+            exc,
+            (
+                binance_errors.ServerError,
+                binance_errors.NetworkError,
+            ),
+        ):
             return DomainExchangeDown(str(exc))
         if isinstance(exc, requests.exceptions.ProxyError):
             return DomainExchangeDown("Proxy error communicating with Binance")
-        if isinstance(exc, requests.exceptions.Timeout):
+        if isinstance(exc, (requests.exceptions.Timeout, TimeoutError)):
             return DomainExchangeDown("Request to Binance timed out")
         if isinstance(exc, requests.exceptions.RequestException):
             return DomainExchangeDown(str(exc))
+        logger.warning("Unmapped Binance error: %s", exc, exc_info=True)
         return exc
 
     def _wrap(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
@@ -167,43 +196,59 @@ class BinanceUSDS:
         func: Callable[..., Any],
         /,
         *args: Any,
-        retries: int = 2,
-        delay: float = 0.25,
         **kwargs: Any,
     ) -> Any:
         attempt = 0
         while True:
             try:
                 return self._wrap(func, *args, **kwargs)
-            except (DomainRateLimit, DomainExchangeDown) as exc:
-                if attempt >= retries:
+            except (
+                DomainRateLimit,
+                DomainExchangeDown,
+                requests.exceptions.RequestException,
+                TimeoutError,
+                ConnectionError,
+            ) as exc:
+                if attempt >= self._max_retries:
                     raise
-                sleep_for = delay * (2**attempt)
-                log.warning(
-                    "BinanceUSDS retry | func=%s attempt=%s/%s sleep=%.2fs reason=%s",
-                    getattr(func, "__name__", str(func)),
-                    attempt + 1,
-                    retries + 1,
-                    sleep_for,
-                    exc,
+                delay = self._backoff_factor * (2**attempt)
+                logger.info(
+                    "binance_retry",
+                    extra={
+                        "symbol": kwargs.get("symbol"),
+                        "endpoint": getattr(func, "__name__", str(func)),
+                        "attempt": attempt + 1,
+                        "delay": delay,
+                    },
                 )
-                time.sleep(sleep_for)
+                time.sleep(delay)
                 attempt += 1
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def exchange_info(self) -> dict:
-        return self._wrap(self._rest.exchange_information)
+    def exchange_information(self) -> dict:
+        """Fetch exchange information (with retries)."""
+
+        return self._call_with_retries(self._rest.exchange_information)
 
     def get_position_mode(self) -> dict:
+        """Return the account position mode configuration."""
+
         return self._wrap(self._rest.get_current_position_mode)
 
     def set_position_mode(self, dual_side: bool) -> dict:
+        """Set hedge (dual-side) position mode."""
+
         value = "true" if dual_side else "false"
-        return self._wrap(self._rest.change_position_mode, dual_side_position=value)
+        return self._call_with_retries(
+            self._rest.change_position_mode,
+            dual_side_position=value,
+        )
 
     def position_information(self, symbol: str | None = None) -> list[dict]:
+        """Return current position information for the provided symbol."""
+
         params: dict[str, Any] = {}
         if symbol:
             params["symbol"] = symbol.upper()
@@ -213,37 +258,45 @@ class BinanceUSDS:
         return data
 
     def account_information(self) -> dict:
+        """Return futures account information."""
+
         return self._wrap(self._rest.account_information_v3)
 
     def account_balance(self) -> list[dict]:
+        """Return futures account balances."""
+
         data = self._wrap(self._rest.futures_account_balance_v3)
         if isinstance(data, list):
             return data
         return [] if data is None else [data]
 
-    # Orders -----------------------------------------------------------------
     def new_order(self, **params: Any) -> dict:
+        """Submit a new order to Binance."""
+
         prepared = self._translate_params(params, self._ORDER_PARAM_ALIASES)
         return self._call_with_retries(self._rest.new_order, **prepared)
 
     def query_order(self, **params: Any) -> dict:
+        """Query an order by orderId or origClientOrderId."""
+
         prepared = self._translate_params(params, self._QUERY_PARAM_ALIASES)
         return self._call_with_retries(self._rest.query_order, **prepared)
 
     def cancel_order(self, **params: Any) -> dict:
+        """Cancel an existing order."""
+
         prepared = self._translate_params(params, self._QUERY_PARAM_ALIASES)
         return self._call_with_retries(self._rest.cancel_order, **prepared)
 
     def change_leverage(self, symbol: str, leverage: int) -> dict:
-        return self._wrap(
+        """Change the leverage for a symbol."""
+
+        return self._call_with_retries(
             self._rest.change_initial_leverage,
             symbol=symbol.upper(),
             leverage=int(leverage),
         )
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     @classmethod
     def _translate_params(
         cls,
@@ -252,19 +305,17 @@ class BinanceUSDS:
     ) -> dict[str, Any]:
         if not params:
             return {}
-        out: dict[str, Any] = {}
-        for key, value in params.items():
-            dest = aliases.get(key, key)
-            if dest == "symbol" and isinstance(value, str):
-                out[dest] = value.upper()
-            else:
-                out[dest] = value
-        return out
+        translated = {aliases.get(k, k): v for k, v in params.items()}
+        return {k: v for k, v in translated.items() if v is not None}
 
     @property
     def base_path(self) -> str:
+        """Return the REST base path used by the adapter."""
+
         return self._base_path
 
     @property
     def timeout_ms(self) -> int:
+        """Return the configured timeout in milliseconds."""
+
         return self._timeout_ms
