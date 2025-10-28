@@ -6,12 +6,11 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import AsyncIterator, Dict, List, Mapping, Optional, Tuple
+from typing import AsyncIterator, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from redis.asyncio import Redis
 
 from .keys import stream_signal, offset_key
-
 
 logger = logging.getLogger(__name__)
 
@@ -27,46 +26,19 @@ class StreamMessage:
 
 class SignalStreamConsumer:
     """
-    Consume Calc service signals from Redis streams and yield (symbol, timeframe, payload, msg_id).
+    Consume Calc service signals from Redis streams and yield StreamMessage objects.
 
-    Features
-    --------
-    - Supports XREAD (simple fan-out) and Consumer Group (competing consumers) modes
-    - Persists offsets per stream in XREAD mode for clean restarts
-    - Skips stale signals using a catch-up threshold (ms) to avoid acting on old data
-    - Robust parser: supports single-field {"json": "..."} or flat K/V (bytes) payloads
-
-    Typical Flow
-    ------------
-    binance WS -> redis ingestor -> calc service -> (this) worker poller -> bots -> binance order(s)
-
-    Usage
+    Modes
     -----
-        redis = Redis.from_url(cfg.redis_url, decode_responses=False)
+    - XREAD (fan-out): persists per-stream offsets (optional) and resumes cleanly after restarts.
+    - Consumer Group (competing consumers): XREADGROUP reading with group creation if needed.
 
-        consumer = SignalStreamConsumer(
-            redis=redis,
-            symbols=cfg.symbols,
-            timeframe=cfg.timeframe,
-            block_ms=cfg.stream_block_ms,
-            start_from_latest=True,       # follow-the-head in prod
-            use_consumer_group=False,     # True if scaling horizontally
-            consumer_group=f"cg:worker:signal|{cfg.timeframe}",
-            consumer_name="worker-1",
-            persist_offsets=True,
-            catchup_threshold_ms=cfg.catchup_threshold_ms,
-        )
-
-        async for sym, tf, payload, msg_id in consumer.consume():
-            ...
-
-    Notes
-    -----
-    - When use_consumer_group=False (XREAD), we store last delivered msg id in key:
-          worker:offset:signal|{SYMBOL:TF}
-      so the worker can resume after restarts.
-    - When use_consumer_group=True, we create (if missing) a single group on each stream
-      and ACK after successfully yielding to the caller.
+    Extras
+    ------
+    - Catch-up protection: skip stale messages older than `catchup_threshold_ms`.
+    - Robust parser: supports {"json": "..."} or flat K/V.
+    - Dedupe: optional short-term SETNX-based guard per (stream, msg_id).
+    - High-level API: `consume_and_handle(handler)` → calls handler and ACKs on success (CG mode).
     """
 
     def __init__(
@@ -93,7 +65,6 @@ class SignalStreamConsumer:
         self._start_from_latest = start_from_latest
 
         self._use_cg = use_consumer_group
-        # Use a single group name across all streams (simplifies XREADGROUP calls)
         self._group = consumer_group or f"cg:worker:signal|{timeframe}"
         self._consumer = consumer_name or "worker"
 
@@ -109,15 +80,14 @@ class SignalStreamConsumer:
         self._last_ack_by_stream: Dict[str, str] = {}
 
     # ---------------------------------------------------------------------
-    # Public API
+    # Public APIs
     # ---------------------------------------------------------------------
 
     async def consume(self) -> AsyncIterator[StreamMessage]:
         """
-        Yield StreamMessage objects containing parsed payloads and metadata.
-
-        In Consumer Group mode, callers are responsible for ACKing via ``ack``.
-        In XREAD mode, last offsets are persisted (if enabled) as they are consumed.
+        Low-level generator API:
+          - CG mode: caller is responsible for calling `ack(...)` on success.
+          - XREAD mode: offsets are persisted automatically (if enabled).
         """
         await self._prepare()
 
@@ -127,6 +97,54 @@ class SignalStreamConsumer:
         else:
             async for item in self._consume_xread():
                 yield item
+
+    async def consume_and_handle(
+        self,
+        handler: Callable[[StreamMessage], Awaitable[None]],
+        *,
+        dedupe_ttl_sec: int = 300,
+    ) -> None:
+        """
+        High-level API:
+          - CG mode: read → (optional dedupe) → handler(msg) → XACK on success only.
+          - XREAD mode: read → handler(msg) (no XACK concept).
+        """
+        await self._prepare()
+
+        if self._use_cg:
+            async for msg in self._consume_cg():
+                # Short-term dedupe (best effort). If this fails, treat as new.
+                if not await self._dedupe_mark(msg.stream_key, msg.message_id, ttl_sec=dedupe_ttl_sec):
+                    logger.info("Duplicate message skipped | stream=%s msg_id=%s", msg.stream_key, msg.message_id)
+                    with contextlib.suppress(Exception):
+                        # Best-effort XACK in case it was previously processed.
+                        await self.ack(msg.stream_key, msg.message_id)
+                    continue
+
+                try:
+                    await handler(msg)
+                except Exception as e:
+                    # No ACK on error; allow retry/DLQ policies to take over.
+                    logger.error(
+                        "Handler error (no ACK) | stream=%s msg_id=%s err=%s",
+                        msg.stream_key, msg.message_id, e, exc_info=True
+                    )
+                    continue
+
+                # Success → ACK
+                acked = await self.ack(msg.stream_key, msg.message_id)
+                if not acked:
+                    logger.warning("XACK returned 0 | stream=%s msg_id=%s", msg.stream_key, msg.message_id)
+        else:
+            async for msg in self._consume_xread():
+                try:
+                    await handler(msg)
+                except Exception as e:
+                    logger.error(
+                        "Handler error (XREAD mode) | stream=%s msg_id=%s err=%s",
+                        msg.stream_key, msg.message_id, e, exc_info=True
+                    )
+                    continue
 
     # ---------------------------------------------------------------------
     # Setup
@@ -141,16 +159,14 @@ class SignalStreamConsumer:
         logger.info("  Persist offsets: %s", self._persist_offsets)
         logger.info("  Catchup threshold: %sms", self._catchup_ms or "disabled")
         logger.info("  Redis decode_responses: %s", getattr(self._redis, 'decode_responses', 'unknown'))
-        
+
         if self._use_cg:
-            # Ensure each stream has the consumer group (create if missing)
             logger.info("Setting up consumer group: %s", self._group)
             for sk in self._stream_keys:
                 logger.debug("Ensuring group exists for stream: %s", sk)
                 await self._ensure_group(sk, self._group, start_latest=self._start_from_latest)
             logger.info("Consumer group setup complete")
         else:
-            # Load or initialize offsets per stream
             logger.info("Loading stream offsets...")
             for sk in self._stream_keys:
                 if self._persist_offsets:
@@ -159,24 +175,25 @@ class SignalStreamConsumer:
                         logger.info("  %s: resuming from %s", sk, last_id)
                 else:
                     last_id = None
+
                 if not last_id:
                     last_id = "$" if self._start_from_latest else "0-0"
                     logger.info("  %s: starting from %s", sk, last_id)
-                
+
                 # Convert to bytes if Redis is not decoding responses
                 if not getattr(self._redis, 'decode_responses', True):
                     logger.debug("Converting stream key to bytes: %s", sk)
                     self._streams_last_id[sk.encode()] = last_id.encode()
                 else:
                     self._streams_last_id[sk] = last_id
-                    
+
             logger.info("Stream offset initialization complete")
             logger.debug("Initialized streams_last_id: %s", dict(self._streams_last_id))
-        
+
         logger.info("Stream consumer preparation complete")
 
     async def _ensure_group(self, stream_key: str, group: str, *, start_latest: bool) -> None:
-        # Create consumer group if it doesn't exist
+        # Create group if it doesn't exist
         try:
             start_id = "$" if start_latest else "0-0"
             await self._redis.xgroup_create(
@@ -187,36 +204,39 @@ class SignalStreamConsumer:
             )
             logger.info("Created consumer group | stream=%s group=%s", stream_key, group)
         except Exception as e:
-            # Group likely already exists (BUSYGROUP error is normal)
+            # BUSYGROUP or benign errors
             logger.debug("Consumer group setup | stream=%s group=%s err=%s", stream_key, group, e)
 
     # ---------------------------------------------------------------------
     # XREAD mode
     # ---------------------------------------------------------------------
 
-    async def _consume_xread(self) -> AsyncIterator[Tuple[str, str, Dict, str]]:
+    async def _consume_xread(self) -> AsyncIterator[StreamMessage]:
         logger.info("Starting XREAD consume loop | streams=%d", len(self._streams_last_id))
         logger.debug("Initial offsets: %s", dict(self._streams_last_id))
-        
+
         iteration = 0
         while True:
             iteration += 1
             try:
                 if iteration == 1 or iteration % 100 == 0:
-                    logger.debug("XREAD iteration %d | blocking for %dms... | offsets=%s", 
-                               iteration, self._block_ms, dict(self._streams_last_id))
-                
-                # redis-py xread expects a dict: {stream_key: last_id, ...}
+                    logger.debug(
+                        "XREAD iteration %d | blocking for %dms... | offsets=%s",
+                        iteration, self._block_ms, dict(self._streams_last_id)
+                    )
+
                 if not self._streams_last_id:
                     logger.error("No streams configured for XREAD | dict_len=%d", len(self._streams_last_id))
                     await asyncio.sleep(1)
                     continue
-                
+
+                # redis-py xread expects: {stream_key: last_id, ...}
                 result = await self._redis.xread(streams=self._streams_last_id, block=self._block_ms)
                 # result: List[Tuple[stream_key, List[Tuple[msg_id, fields_dict]]]]
+
                 if not result:
                     if iteration % 10 == 0:
-                        logger.debug("No messages after %d iterations (normal during idle periods)", iteration)
+                        logger.debug("No messages after %d iterations (idle ok)", iteration)
                     continue
 
                 total_entries = sum(len(entries) for _, entries in result)
@@ -229,9 +249,9 @@ class SignalStreamConsumer:
                     for raw_msg_id, fields in entries:
                         msg_id = self._normalize_msg_id(raw_msg_id)
                         payload = self._parse(fields)
-                        # Staleness check (uses payload["ts"] in epoch ms if present)
+
+                        # Staleness check
                         if self._is_stale(payload, self._catchup_ms):
-                            # Advance offset & persist, but skip delivering the message
                             logger.debug("Skipping stale message | stream=%s msg_id=%s", stream_key, msg_id)
                             self._update_last_id(raw_stream_key, msg_id)
                             if self._persist_offsets:
@@ -239,16 +259,15 @@ class SignalStreamConsumer:
                             continue
 
                         sym, tf = self._split_stream_key(stream_key)
-                        # Advance offset & persist
+
+                        # Advance offset & persist BEFORE yielding (at-least-once semantics)
                         self._update_last_id(raw_stream_key, msg_id)
                         if self._persist_offsets:
                             await self._save_offset(stream_key, msg_id)
 
                         logger.debug(
                             "Yielding message | stream=%s msg_id=%s type=%s",
-                            stream_key,
-                            msg_id,
-                            payload.get('type', 'unknown'),
+                            stream_key, msg_id, payload.get('type', 'unknown')
                         )
                         yield StreamMessage(
                             stream_key=stream_key,
@@ -262,8 +281,7 @@ class SignalStreamConsumer:
                 logger.info("XREAD consume loop cancelled")
                 raise
             except Exception as e:
-                logger.error("XREAD error (will retry after 0.5s) | err=%s", e, exc_info=True)
-                # Backoff lightly on transient errors
+                logger.error("XREAD error (retry in 0.5s) | err=%s", e, exc_info=True)
                 await asyncio.sleep(0.5)
 
     # ---------------------------------------------------------------------
@@ -274,8 +292,10 @@ class SignalStreamConsumer:
         """
         Uses XREADGROUP against all tracked streams with the same consumer group.
         """
-        logger.info("Starting XREADGROUP consume loop | group=%s consumer=%s streams=%d",
-                   self._group, self._consumer, len(self._stream_keys))
+        logger.info(
+            "Starting XREADGROUP consume loop | group=%s consumer=%s streams=%d",
+            self._group, self._consumer, len(self._stream_keys)
+        )
 
         iteration = 0
         while True:
@@ -283,8 +303,8 @@ class SignalStreamConsumer:
             try:
                 if iteration == 1 or iteration % 100 == 0:
                     logger.debug("XREADGROUP iteration %d | blocking for %dms...", iteration, self._block_ms)
-                
-                # Build streams dict as {stream_key: '>'} for new messages
+
+                # IMPORTANT: use '>' for new messages
                 streams = {sk: ">" for sk in self._stream_keys}
                 result = await self._redis.xreadgroup(
                     groupname=self._group,
@@ -294,7 +314,7 @@ class SignalStreamConsumer:
                 )
                 if not result:
                     if iteration % 10 == 0:
-                        logger.debug("No messages after %d iterations (normal during idle periods)", iteration)
+                        logger.debug("No messages after %d iterations (idle ok)", iteration)
                     continue
 
                 total_entries = sum(len(entries) for _, entries in result)
@@ -308,13 +328,9 @@ class SignalStreamConsumer:
                         msg_id = self._normalize_msg_id(raw_msg_id)
                         payload = self._parse(fields)
 
-                        # Staleness check: ACK and skip if stale
+                        # Stale → ACK and skip
                         if self._is_stale(payload, self._catchup_ms):
-                            logger.debug(
-                                "Skipping stale message (ACKing) | stream=%s msg_id=%s",
-                                stream_key,
-                                msg_id,
-                            )
+                            logger.debug("Skipping stale (ACKing) | stream=%s msg_id=%s", stream_key, msg_id)
                             with contextlib.suppress(Exception):
                                 acked = await self._redis.xack(stream_key, self._group, msg_id)
                                 if acked:
@@ -325,9 +341,7 @@ class SignalStreamConsumer:
 
                         logger.debug(
                             "Yielding message | stream=%s msg_id=%s type=%s",
-                            stream_key,
-                            msg_id,
-                            payload.get('type', 'unknown'),
+                            stream_key, msg_id, payload.get('type', 'unknown')
                         )
                         yield StreamMessage(
                             stream_key=stream_key,
@@ -341,23 +355,17 @@ class SignalStreamConsumer:
                 logger.info("XREADGROUP consume loop cancelled")
                 raise
             except Exception as e:
-                logger.error("XREADGROUP error (will retry after 0.5s) | err=%s", e, exc_info=True)
+                logger.error("XREADGROUP error (retry in 0.5s) | err=%s", e, exc_info=True)
                 await asyncio.sleep(0.5)
 
     async def ack(self, stream_key: str, msg_id: str) -> bool:
-        """ACK a message for the configured consumer group."""
+        """ACK a message for the configured consumer group (no-op in XREAD mode)."""
         if not self._use_cg:
             return True
         try:
             acked = await self._redis.xack(stream_key, self._group, msg_id)
         except Exception as exc:
-            logger.error(
-                "XACK error | stream=%s msg_id=%s err=%s",
-                stream_key,
-                msg_id,
-                exc,
-                exc_info=True,
-            )
+            logger.error("XACK error | stream=%s msg_id=%s err=%s", stream_key, msg_id, exc, exc_info=True)
             return False
         if acked:
             self._last_ack_by_stream[stream_key] = msg_id
@@ -383,11 +391,7 @@ class SignalStreamConsumer:
                     idle=idle_ms,
                 )
             except Exception as exc:
-                logger.debug(
-                    "XPENDING cleanup skipped | stream=%s err=%s",
-                    stream_key,
-                    exc,
-                )
+                logger.debug("XPENDING cleanup skipped | stream=%s err=%s", stream_key, exc)
                 continue
 
             if not pending:
@@ -403,17 +407,11 @@ class SignalStreamConsumer:
                     cleaned[stream_key] = acked
                     self._last_ack_by_stream[stream_key] = stale_ids[-1]
                     logger.info(
-                        "Cleaned %d stale pending entries | stream=%s last_id=%s",
-                        acked,
-                        stream_key,
-                        stale_ids[-1],
+                        "Cleaned %d stale pending | stream=%s last_id=%s",
+                        acked, stream_key, stale_ids[-1]
                     )
             except Exception as exc:
-                logger.warning(
-                    "Failed to clean pending entries | stream=%s err=%s",
-                    stream_key,
-                    exc,
-                )
+                logger.warning("Failed to clean pending | stream=%s err=%s", stream_key, exc)
 
         return cleaned
 
@@ -434,13 +432,12 @@ class SignalStreamConsumer:
                 logger.debug("No stored offset found | key=%s", k)
                 return None
             if isinstance(val, (bytes, bytearray)):
-                try:
+                with contextlib.suppress(Exception):
                     decoded = val.decode()
                     logger.debug("Loaded offset | key=%s offset=%s", k, decoded)
                     return decoded
-                except Exception as e:
-                    logger.warning("Failed to decode offset | key=%s err=%s", k, e)
-                    return None
+                logger.warning("Failed to decode offset | key=%s", k)
+                return None
             result = str(val)
             logger.debug("Loaded offset | key=%s offset=%s", k, result)
             return result
@@ -464,7 +461,7 @@ class SignalStreamConsumer:
     @staticmethod
     def _parse(fields: Mapping[bytes, bytes]) -> Dict:
         """
-        Supports both:
+        Supports:
           1) {"json": b'{"type": "...", ...}'}
           2) flat fields: {b"type": b"arm", b"sym": b"BTCUSDT", ...}
         """
@@ -524,3 +521,16 @@ class SignalStreamConsumer:
         except Exception as e:
             logger.debug("Could not determine staleness | err=%s", e)
             return False
+
+    async def _dedupe_mark(self, stream_key: str, msg_id: str, ttl_sec: int = 300) -> bool:
+        """Best-effort dedupe using SETNX + EX per (stream, msg_id)."""
+        try:
+            key = f"dedupe:{stream_key}:{msg_id}"
+            created = await self._redis.setnx(key, "1")
+            if created:
+                with contextlib.suppress(Exception):
+                    await self._redis.expire(key, ttl_sec)
+            return bool(created)
+        except Exception as e:
+            logger.debug("dedupe_mark failed open (treat as new) | err=%s", e)
+            return True

@@ -5,7 +5,7 @@ from typing import Awaitable, Callable, Optional, Protocol
 from uuid import UUID
 
 from ..domain.models import ArmSignal, BotConfig, OrderState
-from ..domain.enums import OrderStatus, Side
+from ..domain.enums import OrderStatus, OrderSide
 from ..domain.exceptions import BinanceAPIException, DomainExchangeError
 
 
@@ -28,7 +28,7 @@ class TradingPort(Protocol):
     async def create_limit_order(
         self,
         symbol: str,
-        side: Side,              # domain enum
+        side: OrderSide,        # domain enum (infra maps to BUY/SELL)
         quantity: Decimal,
         price: Decimal,
         reduce_only: bool = False,
@@ -133,7 +133,7 @@ class OrderExecutor:
         try:
             resp = await trading.create_limit_order(
                 symbol=signal.symbol,
-                side=signal.side,          # pass domain enum; infra maps to BUY/SELL
+                side=signal.side,      # pass OrderSide; infra maps to BUY/SELL
                 quantity=q_qty,
                 price=q_price,
                 reduce_only=False,

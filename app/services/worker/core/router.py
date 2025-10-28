@@ -4,7 +4,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
-from ..domain.enums import Side
+from ..domain.enums import OrderSide, SideWhitelist
 from ..domain.models import BotConfig
 
 
@@ -15,7 +15,7 @@ class SymbolRouter:
     Also keeps a local cache of BotConfig for quick filtering.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._subscriptions: Dict[Tuple[str, str], List[UUID]] = defaultdict(list)
         self._bot_configs: Dict[UUID, BotConfig] = {}
 
@@ -30,23 +30,21 @@ class SymbolRouter:
         self,
         symbol: str,
         timeframe: str,
-        side: Side,
+        side: OrderSide,
     ) -> List[BotConfig]:
         """
         Return bots for (symbol, timeframe) that:
           - are enabled
-          - include `side` in side_whitelist (or whitelist == BOTH)
+          - allow `side` per side_whitelist (BOTH | LONG | SHORT)
         """
         key = (symbol.upper(), timeframe)
         bot_ids = self._subscriptions.get(key, [])
         out: List[BotConfig] = []
         for bid in bot_ids:
             cfg = self._bot_configs.get(bid)
-            if not cfg:
+            if not cfg or not cfg.enabled:
                 continue
-            if not cfg.enabled:
-                continue
-            if cfg.side_whitelist == Side.BOTH or cfg.side_whitelist == side:
+            if cfg.allows_side(side):
                 out.append(cfg)
         return out
 

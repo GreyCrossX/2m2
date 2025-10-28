@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping, Optional, Union
 from uuid import UUID, uuid4
 
-from .enums import OrderStatus, SignalType, Side
+from .enums import OrderStatus, SignalType, OrderSide, SideWhitelist
 from .exceptions import InvalidSignalException
 
 
@@ -36,20 +36,37 @@ def _ms_to_datetime(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
 
 
-def _parse_side(name: str, value: Any, *, allow_both: bool = False) -> Side:
+def _parse_order_side(name: str, value: Any) -> OrderSide:
+    """Parse a true trading side (only 'long' or 'short')."""
     if value is None:
         raise InvalidSignalException(f"Missing side field: {name}")
     try:
-        s = str(value).lower()
+        s = str(value).strip().lower()
     except Exception:
         raise InvalidSignalException(f"Invalid side for '{name}': {value!r}")
     if s == "long":
-        return Side.LONG
+        return OrderSide.LONG
     if s == "short":
-        return Side.SHORT
-    if allow_both and s == "both":
-        return Side.BOTH
-    raise InvalidSignalException(f"Invalid side for '{name}': {value!r}")
+        return OrderSide.SHORT
+    # 'both' is NEVER valid for real orders/signals
+    raise InvalidSignalException(f"Invalid order side for '{name}': {value!r}")
+
+
+def _parse_whitelist_side(name: str, value: Any) -> SideWhitelist:
+    """Parse bot configuration whitelist side ('long'|'short'|'both')."""
+    if value is None:
+        raise InvalidSignalException(f"Missing side field: {name}")
+    try:
+        s = str(value).strip().lower()
+    except Exception:
+        raise InvalidSignalException(f"Invalid side for '{name}': {value!r}")
+    if s == "both":
+        return SideWhitelist.BOTH
+    if s == "long":
+        return SideWhitelist.LONG
+    if s == "short":
+        return SideWhitelist.SHORT
+    raise InvalidSignalException(f"Invalid whitelist side for '{name}': {value!r}")
 
 
 # ---------- Signals ----------
@@ -75,7 +92,7 @@ class ArmSignal:
     }
     """
     version: str
-    side: Side
+    side: OrderSide
     symbol: str
     timeframe: str
     ts_ms: int
@@ -86,7 +103,7 @@ class ArmSignal:
     ind_low: Decimal
     trigger: Decimal
     stop: Decimal
-    # Redis stream message id can be attached by the application layer after parsing:
+    # Redis stream message id can be attached by the application layer via dataclasses.replace(...)
     signal_msg_id: Optional[str] = None  # e.g., "1697890123456-0"
 
     @classmethod
@@ -94,7 +111,7 @@ class ArmSignal:
         if str(data.get("type", "")).lower() != SignalType.ARM.value:
             raise InvalidSignalException("Expected ARM signal type.")
         version = str(data.get("v", ""))
-        side = _parse_side("side", data.get("side"))
+        side = _parse_order_side("side", data.get("side"))
         symbol = str(data.get("sym", "")).upper()
         timeframe = str(data.get("tf", ""))
         if not symbol or not timeframe or not version:
@@ -150,7 +167,7 @@ class DisarmSignal:
     }
     """
     version: str
-    prev_side: Side
+    prev_side: OrderSide
     symbol: str
     timeframe: str
     ts_ms: int
@@ -163,7 +180,7 @@ class DisarmSignal:
         if str(data.get("type", "")).lower() != SignalType.DISARM.value:
             raise InvalidSignalException("Expected DISARM signal type.")
         version = str(data.get("v", ""))
-        prev_side = _parse_side("prev_side", data.get("prev_side"))
+        prev_side = _parse_order_side("prev_side", data.get("prev_side"))
         symbol = str(data.get("sym", "")).upper()
         timeframe = str(data.get("tf", ""))
         if not symbol or not timeframe or not version:
@@ -209,7 +226,7 @@ class BotConfig:
     enabled: bool
     env: str  # "testnet" | "prod"
 
-    side_whitelist: Side  # Side.BOTH allowed here
+    side_whitelist: SideWhitelist  # 'both' is allowed here
     leverage: int
 
     use_balance_pct: bool
@@ -217,11 +234,12 @@ class BotConfig:
     fixed_notional: Optional[Decimal]    # alternative sizing mode
     max_position_usdt: Optional[Decimal] # risk cap per position
 
-    def allows_side(self, side: Side) -> bool:
+    def allows_side(self, side: OrderSide) -> bool:
         """Check if the bot is configured to trade the given side."""
         return (
-            self.side_whitelist == Side.BOTH
-            or self.side_whitelist == side
+            self.side_whitelist == SideWhitelist.BOTH
+            or (self.side_whitelist == SideWhitelist.LONG and side == OrderSide.LONG)
+            or (self.side_whitelist == SideWhitelist.SHORT and side == OrderSide.SHORT)
         )
 
 
@@ -237,7 +255,7 @@ class OrderState:
     bot_id: UUID
     signal_id: str                   # Redis stream message ID
     status: OrderStatus
-    side: Side
+    side: OrderSide
     symbol: str
 
     trigger_price: Decimal
@@ -268,7 +286,7 @@ class Position:
     """
     bot_id: UUID
     symbol: str
-    side: Side
+    side: OrderSide
 
     entry_price: Decimal
     quantity: Decimal
@@ -285,10 +303,10 @@ class Position:
           SHORT: (entry - mark) * qty
         """
         mark = _parse_decimal("mark_price", mark_price)
-        if self.side == Side.LONG:
+        if self.side == OrderSide.LONG:
             self.unrealized_pnl = (mark - self.entry_price) * self.quantity
-        elif self.side == Side.SHORT:
+        elif self.side == OrderSide.SHORT:
             self.unrealized_pnl = (self.entry_price - mark) * self.quantity
         else:
-            # Side.BOTH is never valid for live positions
-            raise InvalidSignalException("Invalid position side: BOTH")
+            # 'both' is never valid for positions
+            raise InvalidSignalException("Invalid position side")

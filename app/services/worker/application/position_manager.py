@@ -5,7 +5,7 @@ from typing import Dict, Optional, Protocol
 from uuid import UUID
 
 from ..domain.models import Position, OrderState
-from ..domain.enums import OrderStatus, Side
+from ..domain.enums import OrderStatus, OrderSide
 from ..domain.exceptions import WorkerException
 
 
@@ -55,12 +55,12 @@ class PositionManager:
         if entry <= 0 or stop <= 0:
             raise WorkerException("Invalid entry/stop prices for position.")
 
-        distance = (entry - stop) if order_state.side == Side.LONG else (stop - entry)
+        distance = (entry - stop) if order_state.side == OrderSide.LONG else (stop - entry)
         if distance <= 0:
             # If stop is not on the protective side, keep a minimal band
             distance = abs(entry - stop)
 
-        if order_state.side == Side.LONG:
+        if order_state.side == OrderSide.LONG:
             take_profit = entry + self._tp_r * distance
         else:
             take_profit = entry - self._tp_r * distance
@@ -88,7 +88,7 @@ class PositionManager:
         pos = self._positions.get(bot_id)
         if not pos:
             return
-        side_str = "SELL" if pos.side == Side.LONG else "BUY"
+        side_str = "SELL" if pos.side == OrderSide.LONG else "BUY"  # infra expects exchange side strings
         qty = pos.quantity
         if qty > 0:
             await self._bx.close_position_market(pos.symbol, side_str, qty)

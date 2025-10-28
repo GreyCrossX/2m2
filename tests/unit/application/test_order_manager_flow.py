@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.services.worker.application.order_executor import OrderExecutor
-from app.services.worker.domain.enums import OrderStatus, Side
+from app.services.worker.domain.enums import OrderStatus, OrderSide, SideWhitelist  # <-- updated
 from app.services.worker.domain.exceptions import BinanceAPIException, DomainBadRequest
 from app.services.worker.domain.models import ArmSignal, BotConfig
 
@@ -43,7 +43,7 @@ class _TradingPortStub:
     async def create_limit_order(
         self,
         symbol: str,
-        side: Side,
+        side: OrderSide,  # <-- updated
         quantity: Decimal,
         price: Decimal,
         reduce_only: bool = False,
@@ -73,7 +73,7 @@ def _build_signal() -> ArmSignal:
     now = datetime.now(timezone.utc)
     return ArmSignal(
         version="1",
-        side=Side.LONG,
+        side=OrderSide.LONG,  # <-- updated
         symbol="BTCUSDT",
         timeframe="2m",
         ts_ms=int(now.timestamp() * 1000),
@@ -96,7 +96,7 @@ def _build_bot() -> BotConfig:
         timeframe="2m",
         enabled=True,
         env="testnet",
-        side_whitelist=Side.BOTH,
+        side_whitelist=SideWhitelist.BOTH,  # <-- updated
         leverage=5,
         use_balance_pct=False,
         balance_pct=Decimal("0"),

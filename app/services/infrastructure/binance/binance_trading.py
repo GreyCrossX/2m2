@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any, Dict, Iterable
 
 from app.services.domain.exceptions import DomainBadRequest, DomainExchangeError
-from app.services.worker.domain.enums import Side
+from app.services.worker.domain.enums import OrderSide  # <<< updated
 
 from .binance_client import BinanceClient
 
@@ -20,9 +20,10 @@ _VALID_TIME_IN_FORCE = {"GTC", "IOC", "FOK", "GTX"}
 _VALID_POSITION_SIDES = {"BOTH", "LONG", "SHORT"}
 
 
-def _normalize_side(side: Side | str) -> str:
-    if isinstance(side, Side):
-        return "BUY" if side == Side.LONG else "SELL"
+def _normalize_side(side: OrderSide | str) -> str:
+    """Map domain side to exchange side string."""
+    if isinstance(side, OrderSide):
+        return "BUY" if side == OrderSide.LONG else "SELL"
     normalized = str(side).upper()
     if normalized not in _VALID_SIDES:
         raise DomainBadRequest(f"Invalid side '{side}'")
@@ -44,7 +45,6 @@ class BinanceTrading:
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         """Set leverage for a symbol."""
-
         await self._client.change_leverage(symbol, int(leverage))
 
     async def quantize_limit_order(
@@ -54,13 +54,12 @@ class BinanceTrading:
         price: Decimal,
     ) -> tuple[Decimal, Decimal | None]:
         """Return quantized quantity and price for diagnostics/tests."""
-
         return await self._client.quantize_order(symbol, quantity, price)
 
     async def create_limit_order(
         self,
         symbol: str,
-        side: Side | str,
+        side: OrderSide | str,
         quantity: Decimal,
         price: Decimal,
         *,
@@ -84,7 +83,8 @@ class BinanceTrading:
             or min_notional_filter.get("minNotional")
             or "0"
         )
-        min_notional = Decimal(str(min_notional_raw)) if min_notional_raw is not None else Decimal("0")
+        # Defensive: ensure safe Decimal construction
+        min_notional = Decimal(str(min_notional_raw)) if min_notional_raw not in (None, "") else Decimal("0")
         notional = q_qty * q_price
         if min_notional > 0 and notional < min_notional:
             raise DomainBadRequest(
@@ -115,7 +115,7 @@ class BinanceTrading:
     async def create_stop_market_order(
         self,
         symbol: str,
-        side: Side | str,
+        side: OrderSide | str,
         quantity: Decimal,
         stop_price: Decimal,
         *,
@@ -151,25 +151,22 @@ class BinanceTrading:
 
     async def cancel_order(self, symbol: str, order_id: int) -> Dict[str, Any]:
         """Cancel an order by id."""
-
         return await self._client.cancel_order(symbol=symbol.upper(), orderId=int(order_id))
 
     async def get_order_status(self, symbol: str, order_id: int) -> str:
         """Return status string for the specified order."""
-
         result = await self._client.query_order(symbol=symbol.upper(), orderId=int(order_id))
         return str(result.get("status", ""))
 
     async def close_position_market(
         self,
         symbol: str,
-        side: Side | str,
+        side: OrderSide | str,
         quantity: Decimal,
         *,
         position_side: str = "BOTH",
     ) -> Dict[str, Any]:
         """Close an open position using a reduce-only market order."""
-
         side_str = _normalize_side(side)
         position = _validate_choice(position_side, _VALID_POSITION_SIDES, "position_side")
         return await self._client.close_position_market(

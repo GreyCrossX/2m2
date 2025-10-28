@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from decimal import Decimal
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Protocol
 from uuid import UUID
 
 from ..core.logging_utils import ensure_log_context, format_log_context
-from ..domain.enums import OrderStatus, Side
+from ..domain.enums import OrderStatus, OrderSide  # <<< changed
 from ..domain.exceptions import InvalidSignalException
 from ..domain.models import ArmSignal, BotConfig, DisarmSignal, OrderState
 
@@ -15,13 +16,11 @@ logger = logging.getLogger(__name__)
 
 class SymbolRouter(Protocol):
     """Port for routing/lookup: which bots are subscribed to a (symbol, timeframe)."""
-
     def get_bot_ids(self, symbol: str, timeframe: str) -> Iterable[UUID]: ...
 
 
 class BotRepository(Protocol):
     """Port to load BotConfig."""
-
     async def get_bot(self, bot_id: UUID) -> Optional[BotConfig]: ...
 
 
@@ -32,7 +31,7 @@ class OrderGateway(Protocol):
         self,
         bot_id: UUID,
         symbol: str,
-        side: Side,
+        side: OrderSide,  # <<< changed
     ) -> List[OrderState]: ...
 
     async def save_state(self, state: OrderState) -> None: ...
@@ -40,7 +39,6 @@ class OrderGateway(Protocol):
 
 class OrderExecutorPort(Protocol):
     """Use case that actually creates an order (we'll inject OrderExecutor)."""
-
     async def execute_order(self, bot: BotConfig, signal: ArmSignal) -> OrderState: ...
 
 
@@ -77,37 +75,32 @@ class SignalProcessor:
             logger.error("Signal symbol not uppercased | symbol=%s", signal.symbol)
             raise InvalidSignalException("Signal symbol must be uppercased.")
 
-        signal.signal_msg_id = message_id
+        # Signals are frozen dataclasses -> attach msg_id via replace
+        sig = replace(signal, signal_msg_id=message_id)
+
         context = ensure_log_context(
             log_context,
-            symbol=signal.symbol,
-            tf=signal.timeframe,
-            type=signal.type.value,
+            symbol=sig.symbol,
+            tf=sig.timeframe,
+            type=sig.type.value,
             msg_id=message_id,
             prev_side=log_context.get("prev_side") if log_context else "-",
         )
         logger.info(
             "Processing ARM signal | side=%s trigger=%s stop=%s | %s",
-            signal.side.value,
-            signal.trigger,
-            signal.stop,
+            sig.side.value,
+            sig.trigger,
+            sig.stop,
             format_log_context(context),
         )
 
         results: List[OrderState] = []
-        bot_ids = list(self._router.get_bot_ids(signal.symbol, signal.timeframe))
+        bot_ids = list(self._router.get_bot_ids(sig.symbol, sig.timeframe))
 
-        logger.info(
-            "Found %d bot(s) subscribed | %s",
-            len(bot_ids),
-            format_log_context(context),
-        )
+        logger.info("Found %d bot(s) subscribed | %s", len(bot_ids), format_log_context(context))
 
         if not bot_ids:
-            logger.warning(
-                "No bots subscribed - signal will not be processed | %s",
-                format_log_context(context),
-            )
+            logger.warning("No bots subscribed - signal will not be processed | %s", format_log_context(context))
             return results
 
         for i, bot_id in enumerate(bot_ids, 1):
@@ -119,37 +112,27 @@ class SignalProcessor:
                 continue
 
             if not bot.enabled:
-                logger.info(
-                    "Bot disabled, skipping | bot_id=%s | %s",
-                    bot_id,
-                    format_log_context(context),
-                )
+                logger.info("Bot disabled, skipping | bot_id=%s | %s", bot_id, format_log_context(context))
                 continue
 
             logger.info(
                 "Checking side whitelist | bot_id=%s bot_whitelist=%s signal_side=%s | %s",
-                bot_id,
-                bot.side_whitelist.value,
-                signal.side.value,
-                format_log_context(context),
+                bot_id, bot.side_whitelist.value, sig.side.value, format_log_context(context),
             )
 
-            if not bot.allows_side(signal.side):
+            if not bot.allows_side(sig.side):
                 logger.info(
                     "Bot side whitelist blocked signal | bot_id=%s whitelist=%s signal_side=%s | %s",
-                    bot_id,
-                    bot.side_whitelist.value,
-                    signal.side.value,
-                    format_log_context(context),
+                    bot_id, bot.side_whitelist.value, sig.side.value, format_log_context(context),
                 )
                 state = OrderState(
                     bot_id=bot.id,
                     signal_id=message_id,
                     status=OrderStatus.SKIPPED_WHITELIST,
-                    side=signal.side,
-                    symbol=signal.symbol,
-                    trigger_price=signal.trigger,
-                    stop_price=signal.stop,
+                    side=sig.side,
+                    symbol=sig.symbol,
+                    trigger_price=sig.trigger,
+                    stop_price=sig.stop,
                     quantity=Decimal("0"),
                 )
                 logger.debug("Saving SKIPPED_WHITELIST state | bot_id=%s", bot_id)
@@ -159,14 +142,11 @@ class SignalProcessor:
 
             logger.info(
                 "Executing order | bot_id=%s side=%s trigger=%s | %s",
-                bot_id,
-                signal.side.value,
-                signal.trigger,
-                format_log_context(context),
+                bot_id, sig.side.value, sig.trigger, format_log_context(context),
             )
 
             try:
-                state = await self._executor.execute_order(bot, signal)
+                state = await self._executor.execute_order(bot, sig)
                 state.signal_id = message_id
                 state.touch()
 
@@ -185,18 +165,13 @@ class SignalProcessor:
             except Exception as e:
                 logger.error(
                     "Order execution failed | bot_id=%s symbol=%s err=%s",
-                    bot_id,
-                    signal.symbol,
-                    e,
-                    exc_info=True,
+                    bot_id, sig.symbol, e, exc_info=True,
                 )
                 continue
 
         logger.info(
             "ARM signal processing complete | bots_processed=%d results=%d | %s",
-            len(bot_ids),
-            len(results),
-            format_log_context(context),
+            len(bot_ids), len(results), format_log_context(context),
         )
 
         status_counts: Dict[str, int] = {}
@@ -218,35 +193,25 @@ class SignalProcessor:
         log_context: Optional[Dict[str, str]] = None,
     ) -> List[str]:
         """Cancel pending orders matching the DISARM semantics."""
-        signal.signal_msg_id = message_id
+        sig = replace(signal, signal_msg_id=message_id)
+
         context = ensure_log_context(
             log_context,
-            symbol=signal.symbol,
-            tf=signal.timeframe,
-            type=signal.type.value,
+            symbol=sig.symbol,
+            tf=sig.timeframe,
+            type=sig.type.value,
             msg_id=message_id,
-            prev_side=signal.prev_side.value,
+            prev_side=sig.prev_side.value,
         )
-        logger.info(
-            "Processing DISARM signal | reason=%s | %s",
-            signal.reason,
-            format_log_context(context),
-        )
+        logger.info("Processing DISARM signal | reason=%s | %s", sig.reason, format_log_context(context))
 
         cancelled: List[str] = []
-        bot_ids = list(self._router.get_bot_ids(signal.symbol, signal.timeframe))
+        bot_ids = list(self._router.get_bot_ids(sig.symbol, sig.timeframe))
 
-        logger.info(
-            "Found %d bot(s) subscribed | %s",
-            len(bot_ids),
-            format_log_context(context),
-        )
+        logger.info("Found %d bot(s) subscribed | %s", len(bot_ids), format_log_context(context))
 
         if not bot_ids:
-            logger.warning(
-                "No bots subscribed - DISARM has no effect | %s",
-                format_log_context(context),
-            )
+            logger.warning("No bots subscribed - DISARM has no effect | %s", format_log_context(context))
             return cancelled
 
         total_matching = 0
@@ -259,43 +224,32 @@ class SignalProcessor:
                 continue
 
             if not bot.enabled:
-                logger.info(
-                    "Bot disabled, skipping | bot_id=%s | %s",
-                    bot_id,
-                    format_log_context(context),
-                )
+                logger.info("Bot disabled, skipping | bot_id=%s | %s", bot_id, format_log_context(context))
                 continue
 
-            logger.debug("Fetching pending orders | bot_id=%s symbol=%s", bot_id, signal.symbol)
+            logger.debug("Fetching pending orders | bot_id=%s symbol=%s", bot_id, sig.symbol)
             pendings = await self._orders.list_pending_order_states(
                 bot_id,
-                signal.symbol,
-                signal.prev_side,
+                sig.symbol,
+                sig.prev_side,  # OrderSide
             )
 
             logger.info(
                 "Found %d pending order(s) | bot_id=%s | %s",
-                len(pendings),
-                bot_id,
-                format_log_context(context),
+                len(pendings), bot_id, format_log_context(context),
             )
 
             for j, state in enumerate(pendings, 1):
                 logger.debug(
                     "Checking pending order %d/%d | bot_id=%s order_id=%s side=%s status=%s",
-                    j,
-                    len(pendings),
-                    bot_id,
-                    state.order_id or "N/A",
-                    state.side.value,
-                    state.status.value,
+                    j, len(pendings), bot_id, state.order_id or "N/A",
+                    state.side.value, state.status.value,
                 )
 
-                if state.side != signal.prev_side:
+                if state.side != sig.prev_side:
                     logger.debug(
                         "Order side mismatch | order_side=%s disarm_prev_side=%s - skipping",
-                        state.side.value,
-                        signal.prev_side.value,
+                        state.side.value, sig.prev_side.value,
                     )
                     continue
 
@@ -304,20 +258,13 @@ class SignalProcessor:
                     continue
 
                 if not state.order_id:
-                    logger.warning(
-                        "Pending order has no order_id | bot_id=%s state_id=%s",
-                        bot_id,
-                        state.id,
-                    )
+                    logger.warning("Pending order has no order_id | bot_id=%s state_id=%s", bot_id, state.id)
                     continue
 
                 total_matching += 1
                 logger.info(
                     "Attempting to cancel order | bot_id=%s order_id=%s symbol=%s | %s",
-                    bot_id,
-                    state.order_id,
-                    state.symbol,
-                    format_log_context(context),
+                    bot_id, state.order_id, state.symbol, format_log_context(context),
                 )
 
                 try:
@@ -325,17 +272,12 @@ class SignalProcessor:
                     await trading.cancel_order(symbol=state.symbol, order_id=int(state.order_id))
                     logger.info(
                         "Order cancelled successfully | bot_id=%s order_id=%s | %s",
-                        bot_id,
-                        state.order_id,
-                        format_log_context(context),
+                        bot_id, state.order_id, format_log_context(context),
                     )
                 except Exception as exc:
                     logger.warning(
                         "Cancel order failed | bot_id=%s order_id=%s disarm_reason=%s err=%s",
-                        bot.id,
-                        state.order_id,
-                        signal.reason,
-                        exc,
+                        bot.id, state.order_id, sig.reason, exc,
                     )
                     continue
 
@@ -346,17 +288,10 @@ class SignalProcessor:
 
         logger.info(
             "DISARM complete | found=%d cancelled=%d msg_id=%s | %s",
-            total_matching,
-            len(cancelled),
-            message_id,
-            format_log_context(context),
+            total_matching, len(cancelled), message_id, format_log_context(context),
         )
 
         if cancelled:
-            logger.info(
-                "Cancelled order IDs: %s | %s",
-                ", ".join(cancelled),
-                format_log_context(context),
-            )
+            logger.info("Cancelled order IDs: %s | %s", ", ".join(cancelled), format_log_context(context))
 
         return cancelled

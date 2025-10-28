@@ -9,8 +9,7 @@ pytestmark = pytest.mark.unit
 
 from app.services.domain.exceptions import DomainBadRequest
 from app.services.infrastructure.binance.binance_trading import BinanceTrading
-from app.services.worker.domain.enums import Side
-
+from app.services.worker.domain.enums import OrderSide  # <-- updated
 
 class _StubClient:
     def __init__(self) -> None:
@@ -70,7 +69,7 @@ async def test_create_limit_order_sends_payload(trading: BinanceTrading, stub_cl
     stub_client.quantize_return = (Decimal("0.05"), Decimal("100.0"))
     result = await trading.create_limit_order(
         "btcusdt",
-        Side.LONG,
+        OrderSide.LONG,  # <-- updated
         Decimal("0.05"),
         Decimal("100.0"),
         reduce_only=True,
@@ -87,13 +86,13 @@ async def test_create_limit_order_sends_payload(trading: BinanceTrading, stub_cl
 async def test_create_limit_order_min_notional(trading: BinanceTrading, stub_client: _StubClient) -> None:
     stub_client.quantize_return = (Decimal("0.001"), Decimal("1.0"))
     with pytest.raises(DomainBadRequest):
-        await trading.create_limit_order("btcusdt", Side.LONG, Decimal("0.001"), Decimal("1"))
+        await trading.create_limit_order("btcusdt", OrderSide.LONG, Decimal("0.001"), Decimal("1"))
 
 
 @pytest.mark.asyncio()
 async def test_create_limit_order_invalid_time_in_force(trading: BinanceTrading) -> None:
     with pytest.raises(DomainBadRequest):
-        await trading.create_limit_order("btcusdt", Side.SHORT, Decimal("1"), Decimal("10"), time_in_force="foo")
+        await trading.create_limit_order("btcusdt", OrderSide.SHORT, Decimal("1"), Decimal("10"), time_in_force="foo")
 
 
 @pytest.mark.asyncio()
@@ -101,7 +100,7 @@ async def test_create_stop_market_requires_supported_type(trading: BinanceTradin
     with pytest.raises(DomainBadRequest):
         await trading.create_stop_market_order(
             "btcusdt",
-            Side.SHORT,
+            OrderSide.SHORT,
             Decimal("0.01"),
             Decimal("90"),
             order_type="LIMIT",
@@ -113,7 +112,7 @@ async def test_create_stop_market_calls_client(trading: BinanceTrading, stub_cli
     stub_client.quantize_return = (Decimal("0.01"), Decimal("95"))
     await trading.create_stop_market_order(
         "btcusdt",
-        Side.SHORT,
+        OrderSide.SHORT,
         Decimal("0.02"),
         Decimal("95"),
         working_type="MARK_PRICE",
@@ -130,7 +129,7 @@ async def test_create_stop_market_take_profit(trading: BinanceTrading, stub_clie
     stub_client.quantize_return = (Decimal("0.01"), Decimal("105"))
     await trading.create_stop_market_order(
         "btcusdt",
-        Side.LONG,
+        OrderSide.LONG,
         Decimal("0.01"),
         Decimal("105"),
         order_type="TAKE_PROFIT_MARKET",
@@ -157,7 +156,7 @@ async def test_cancel_and_query_delegates(trading: BinanceTrading, stub_client: 
 
 @pytest.mark.asyncio()
 async def test_close_position_market_validates_position_side(trading: BinanceTrading, stub_client: _StubClient) -> None:
-    await trading.close_position_market("btcusdt", Side.SHORT, Decimal("0.01"), position_side="long")
+    await trading.close_position_market("btcusdt", OrderSide.SHORT, Decimal("0.01"), position_side="long")
     call = stub_client.close_calls[0]
     assert call["kwargs"]["position_side"] == "LONG"
 

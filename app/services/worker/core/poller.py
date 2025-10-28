@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from redis.asyncio import Redis
 
@@ -47,19 +47,17 @@ class WorkerPoller:
         self._reload_task: Optional[asyncio.Task] = None
         self._router_refresh_seconds = router_refresh_seconds or getattr(config, "router_refresh_seconds", 60)
         self._dedupe_ttl = max(dedupe_ttl_seconds, 1)
-        self._pending_idle_ms = self._dedupe_ttl * 1000
-        self._ack_attempts: Dict[Tuple[str, str], int] = {}
-        self._ack_history: Dict[Tuple[str, str], int] = {}
         self._router_fp: Optional[int] = None
 
     async def start(self) -> None:
         """Load bots, warm the router, and begin the consume loop."""
         self._running = True
-        logger.info("Loading enabled bots from database...")
+        logger.info("Fetching enabled bots from database...")
         await self._reload_bots()
 
+        # Clean stale pendings so the group is healthy before starting
         with contextlib.suppress(Exception):
-            await self._consumer.cleanup_stale_pending(idle_ms=self._pending_idle_ms, limit=100)
+            await self._consumer.cleanup_stale_pending(idle_ms=self._dedupe_ttl * 1000, limit=100)
 
         logger.info(
             "Starting background router refresher (interval=%ds)...",
@@ -77,59 +75,9 @@ class WorkerPoller:
         )
 
         logger.info("Beginning signal consumption loop...")
-        async for message in self._consumer.consume():
-            if not self._running:
-                logger.info("Poller stopped flag set, breaking consume loop")
-                break
 
-            log_context = self._build_log_context(message)
-            logger.info("Received signal | %s", format_log_context(log_context))
-
-            dedupe_key = self._dedupe_key(message.stream_key, message.message_id)
-            acquired = await self._acquire_dedupe(dedupe_key, log_context)
-            if not acquired:
-                self._metrics.inc_duplicate()
-                self._warn_redelivery(message.stream_key, message.message_id, log_context)
-                logger.info("Duplicate signal skipped | %s", format_log_context(log_context))
-                ack_ok = await self._ack_message(message, log_context)
-                if not ack_ok:
-                    self._metrics.inc_ack_failed()
-                    await self._consumer.cleanup_stale_pending(idle_ms=self._pending_idle_ms, limit=50)
-                self._ack_history.pop((message.stream_key, message.message_id), None)
-                continue
-
-            try:
-                updated_context = await self._process_signal(message, log_context)
-                log_context = updated_context
-                self._metrics.inc_processed(status="success")
-                logger.info(
-                    "Signal processed successfully | sym=%s tf=%s type=%s msg_id=%s prev_side=%s",
-                    log_context.get("symbol", "-"),
-                    log_context.get("tf", "-"),
-                    log_context.get("type", "-"),
-                    log_context.get("msg_id", "-"),
-                    log_context.get("prev_side", "-"),
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._metrics.inc_processed(status="error")
-                logger.error(
-                    "Signal processing error | %s err=%s",
-                    format_log_context(log_context),
-                    exc,
-                    exc_info=True,
-                )
-                with contextlib.suppress(Exception):
-                    await self._redis.delete(dedupe_key)
-                continue
-
-            ack_ok = await self._ack_message(message, log_context)
-            if not ack_ok:
-                self._metrics.inc_ack_failed()
-                await self._consumer.cleanup_stale_pending(idle_ms=self._pending_idle_ms, limit=50)
-                with contextlib.suppress(Exception):
-                    await self._redis.delete(dedupe_key)
+        # High-level loop: handler + ACK-on-success handled by the consumer (CG mode)
+        await self._consumer.consume_and_handle(self._handle_message, dedupe_ttl_sec=self._dedupe_ttl)
 
     async def stop(self) -> None:
         """Graceful shutdown for background tasks."""
@@ -143,6 +91,34 @@ class WorkerPoller:
             logger.info("Router refresher task cancelled")
         logger.info("WorkerPoller stopped")
 
+    # ---------------------------------------------------------------------
+    # Handler invoked by the consumer
+    # ---------------------------------------------------------------------
+
+    async def _handle_message(self, message: StreamMessage) -> None:
+        """
+        Parse and route a single StreamMessage.
+        - On success: return normally (consumer will XACK in CG mode).
+        - On error: raise (consumer will NOT ack).
+        """
+        log_context = self._build_log_context(message)
+        logger.info("Received signal | %s", format_log_context(log_context))
+
+        updated_context = await self._process_signal(message, log_context)
+        logger.info(
+            "Signal processed successfully | sym=%s tf=%s type=%s msg_id=%s prev_side=%s",
+            updated_context.get("symbol", "-"),
+            updated_context.get("tf", "-"),
+            updated_context.get("type", "-"),
+            updated_context.get("msg_id", "-"),
+            updated_context.get("prev_side", "-"),
+        )
+        self._metrics.inc_processed(status="success")
+
+    # ---------------------------------------------------------------------
+    # Core processing
+    # ---------------------------------------------------------------------
+
     async def _process_signal(
         self,
         message: StreamMessage,
@@ -150,8 +126,6 @@ class WorkerPoller:
     ) -> Dict[str, str]:
         """Parse the payload and invoke the appropriate SignalProcessor handler."""
         payload = message.payload
-        symbol = message.symbol
-        timeframe = message.timeframe
         msg_id = message.message_id
         msg_type = str(payload.get("type", "")).lower()
 
@@ -169,11 +143,8 @@ class WorkerPoller:
                     format_log_context(log_context),
                 )
             except Exception as exc:
-                logger.error(
-                    "Failed to parse ARM signal | err=%s | %s",
-                    exc,
-                    format_log_context(log_context),
-                )
+                self._metrics.inc_processed(status="error")
+                logger.error("Failed to parse ARM signal | err=%s | %s", exc, format_log_context(log_context))
                 raise InvalidSignalException(f"Invalid ARM signal: {exc}") from exc
 
             await self._sp.process_arm_signal(signal, msg_id, log_context)
@@ -195,19 +166,21 @@ class WorkerPoller:
                     format_log_context(log_context),
                 )
             except Exception as exc:
-                logger.error(
-                    "Failed to parse DISARM signal | err=%s | %s",
-                    exc,
-                    format_log_context(log_context),
-                )
+                self._metrics.inc_processed(status="error")
+                logger.error("Failed to parse DISARM signal | err=%s | %s", exc, format_log_context(log_context))
                 raise InvalidSignalException(f"Invalid DISARM signal: {exc}") from exc
 
             await self._sp.process_disarm_signal(signal, msg_id, log_context)
             logger.debug("Processed DISARM | %s", format_log_context(log_context))
             return log_context
 
+        self._metrics.inc_processed(status="error")
         logger.error("Unknown signal type | type=%s data=%s", msg_type, payload)
         raise InvalidSignalException(f"Unknown signal type '{msg_type}'")
+
+    # ---------------------------------------------------------------------
+    # Router management
+    # ---------------------------------------------------------------------
 
     async def _reload_bots(self) -> None:
         """Pull fresh enabled bots and rebuild router mappings if changed."""
@@ -219,30 +192,19 @@ class WorkerPoller:
             for bot in bots:
                 logger.info(
                     "  Bot: id=%s user=%s symbol=%s tf=%s side=%s leverage=%dx env=%s",
-                    bot.id,
-                    bot.user_id,
-                    bot.symbol,
-                    bot.timeframe,
-                    bot.side_whitelist.value,
-                    bot.leverage,
-                    bot.env,
+                    bot.id, bot.user_id, bot.symbol, bot.timeframe,
+                    bot.side_whitelist.value, bot.leverage, bot.env,
                 )
         else:
             logger.warning("No enabled bots found in database")
 
-        fingerprint = hash(
-            tuple(sorted((str(b.id), b.symbol.upper(), b.timeframe) for b in bots))
-        )
+        fingerprint = hash(tuple(sorted((str(b.id), b.symbol.upper(), b.timeframe) for b in bots)))
         if fingerprint != self._router_fp:
             logger.info("Rebuilding router subscriptions...")
             self._router.reload_subscriptions(bots)
             self._router_fp = fingerprint
             symbols_str = ",".join(sorted({b.symbol.upper() for b in bots})) if bots else "-"
-            logger.info(
-                "Router rebuilt | subs=%d symbols=%s",
-                len(self._router),
-                symbols_str,
-            )
+            logger.info("Router rebuilt | subs=%d symbols=%s", len(self._router), symbols_str)
         else:
             logger.debug("Router fingerprint unchanged | subs=%d", len(self._router))
 
@@ -260,6 +222,10 @@ class WorkerPoller:
         except asyncio.CancelledError:
             logger.info("Router refresher cancelled")
 
+    # ---------------------------------------------------------------------
+    # Logging helpers
+    # ---------------------------------------------------------------------
+
     def _build_log_context(self, message: StreamMessage) -> Dict[str, str]:
         payload_type = str(message.payload.get("type", "")).lower()
         prev_side = str(message.payload.get("prev_side", "-") or "-")
@@ -270,60 +236,3 @@ class WorkerPoller:
             "msg_id": message.message_id,
             "prev_side": prev_side,
         }
-
-    async def _acquire_dedupe(self, key: str, context: Dict[str, str]) -> bool:
-        try:
-            result = await self._redis.set(key, "1", nx=True, ex=self._dedupe_ttl)
-            return bool(result)
-        except Exception as exc:
-            logger.error(
-                "Deduplication guard error | key=%s err=%s | %s",
-                key,
-                exc,
-                format_log_context(context),
-                exc_info=True,
-            )
-            return True
-
-    async def _ack_message(self, message: StreamMessage, context: Dict[str, str]) -> bool:
-        key = (message.stream_key, message.message_id)
-        attempts = self._ack_attempts.get(key, 0) + 1
-        self._ack_attempts[key] = attempts
-
-        acked = await self._consumer.ack(message.stream_key, message.message_id)
-        last_ack = self._consumer.last_ack(message.stream_key)
-        if acked:
-            if attempts > 1:
-                self._ack_history[key] = attempts
-            else:
-                self._ack_history.pop(key, None)
-            self._ack_attempts.pop(key, None)
-            logger.debug(
-                "ACK success | attempts=%d last_ack=%s | %s",
-                attempts,
-                last_ack or "-",
-                format_log_context(context),
-            )
-            return True
-
-        logger.error(
-            "ACK failed | attempts=%d last_ack=%s | %s",
-            attempts,
-            last_ack or "-",
-            format_log_context(context),
-        )
-        return False
-
-    def _warn_redelivery(self, stream_key: str, msg_id: str, context: Dict[str, str]) -> None:
-        key = (stream_key, msg_id)
-        attempts = max(self._ack_attempts.get(key, 0), self._ack_history.get(key, 0))
-        if attempts > 1:
-            logger.warning(
-                "Message re-delivered after %d ACK attempt(s) | %s",
-                attempts,
-                format_log_context(context),
-            )
-
-    @staticmethod
-    def _dedupe_key(stream_key: str, msg_id: str) -> str:
-        return f"dedupe:{stream_key}:{msg_id}"

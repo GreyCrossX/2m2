@@ -5,9 +5,9 @@ from typing import Optional
 
 from ..application.order_executor import OrderExecutor
 from ..application.position_manager import PositionManager
-from ..domain.enums import OrderStatus, Side
+from ..domain.enums import OrderStatus, OrderSide, SideWhitelist
 from ..domain.models import ArmSignal, DisarmSignal, OrderState
-from ..infrastructure.binance.trading import BinanceTrading
+from  ...infrastructure.binance.binance_trading  import BinanceTrading
 
 
 class BotWorker:
@@ -41,8 +41,7 @@ class BotWorker:
 
     async def handle_arm_signal(self, signal: ArmSignal, message_id: str) -> OrderState:
         # If side not allowed, mark as SKIPPED_WHITELIST (usually filtered earlier).
-        if not (self._bot.side_whitelist == Side.BOTH or self._bot.side_whitelist == signal.side):
-            # Let OrderExecutor set status when it returns; here we just avoid sending an order.
+        if not self._bot.allows_side(signal.side):
             st = OrderState(
                 bot_id=self._bot.id,
                 signal_id=message_id,
@@ -59,6 +58,7 @@ class BotWorker:
 
         # Execute entry (balance validation, leverage, limit order)
         st = await self._order_executor.execute_order(self._bot, signal)
+        # attach message id if needed by caller afterwards
         self._state = st
 
         # Place protective stop (best-effort, only if quantity > 0 and order placed)
@@ -66,7 +66,7 @@ class BotWorker:
             if st.quantity > 0 and st.order_id:
                 await self._trading.create_stop_market_order(
                     symbol=st.symbol,
-                    side=st.side,
+                    side=st.side,  # OrderSide; infra maps to exchange side string internally
                     quantity=st.quantity,
                     stop_price=st.stop_price,
                 )
@@ -90,7 +90,7 @@ class BotWorker:
                 # Cancellation failure will be logged upstream; we leave state untouched.
                 pass
 
-        # Clear after DISARM; caller may persist state before clearing.
+        # Keep state (caller may persist), then it can be cleared upstream if desired
         self._state = st
 
     def get_state(self) -> Optional[OrderState]:
