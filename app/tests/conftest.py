@@ -71,14 +71,6 @@ if "celery_app" not in sys.modules:
     cam.app = cam.celery
     sys.modules["celery_app"] = cam
 
-# Optional legacy alias used by older imports
-try:
-    import app.services.calc.strategy as _strategy
-    sys.modules["services.calc.strategy"] = _strategy
-except Exception:
-    pass
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Pytest config (register markers to silence warnings w/o relying on pytest.ini)
 # ──────────────────────────────────────────────────────────────────────────────

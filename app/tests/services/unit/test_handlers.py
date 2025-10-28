@@ -13,7 +13,6 @@ def _invoke(task, payload):
     """
     return task.run(payload)
 
-@pytest.mark.unit
 def test_on_arm_signal_missing_field(fake_redis):
     h = _load_handlers()
     out = _invoke(h.on_arm_signal, {
@@ -27,7 +26,6 @@ def test_on_arm_signal_missing_field(fake_redis):
     assert out["ok"] is False
     assert "missing field" in out["error"]
 
-@pytest.mark.unit
 def test_on_arm_signal_duplicate_skips(fake_redis, monkeypatch):
     h = _load_handlers()
     # ensure already_processed short-circuits before reading cfg
@@ -45,7 +43,6 @@ def test_on_arm_signal_duplicate_skips(fake_redis, monkeypatch):
     assert out["ok"] is True
     assert out.get("skipped") == "duplicate"
 
-@pytest.mark.unit
 def test_on_arm_signal_missing_bot_config(fake_redis, monkeypatch):
     h = _load_handlers()
     monkeypatch.setattr(h, "already_processed", lambda b, s: False)
@@ -61,7 +58,6 @@ def test_on_arm_signal_missing_bot_config(fake_redis, monkeypatch):
     assert out["ok"] is False
     assert out["error"] == "bot config not found"
 
-@pytest.mark.unit
 def test_on_arm_signal_plan_not_ok(fake_redis, monkeypatch):
     h = _load_handlers()
     monkeypatch.setattr(h, "already_processed", lambda b, s: False)
@@ -78,7 +74,6 @@ def test_on_arm_signal_plan_not_ok(fake_redis, monkeypatch):
     assert out["ok"] is False
     assert out["error"] == "plan_not_ok"
 
-@pytest.mark.unit
 def test_on_arm_signal_entry_failure(fake_redis, monkeypatch):
     h = _load_handlers()
     monkeypatch.setattr(h, "already_processed", lambda b, s: False)
@@ -96,7 +91,6 @@ def test_on_arm_signal_entry_failure(fake_redis, monkeypatch):
     assert out["ok"] is False
     assert out["error"] == "entry_failed"
 
-@pytest.mark.unit
 def test_on_arm_signal_brackets_failure_returns_partial(fake_redis, monkeypatch):
     h = _load_handlers()
     monkeypatch.setattr(h, "already_processed", lambda b, s: False)
@@ -116,7 +110,6 @@ def test_on_arm_signal_brackets_failure_returns_partial(fake_redis, monkeypatch)
     assert out["entry_id"] == "111"
     assert out.get("placed") == ["222"]
 
-@pytest.mark.unit
 def test_on_arm_signal_happy_path_marks_processed(fake_redis, monkeypatch):
     h = _load_handlers()
     marked = {"called": False}
@@ -144,7 +137,6 @@ def test_on_arm_signal_happy_path_marks_processed(fake_redis, monkeypatch):
     assert out["sl_tp_ids"] == ["888", "999"]
     assert marked["called"] is True
 
-@pytest.mark.unit
 def test_on_disarm_signal_happy_path(fake_redis, monkeypatch):
     h = _load_handlers()
     monkeypatch.setattr(h, "disarm", lambda bot_id: {"ok": True, "cancelled": {"entry": True, "brackets": 2}})

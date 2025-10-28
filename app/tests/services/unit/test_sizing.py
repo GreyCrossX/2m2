@@ -2,7 +2,6 @@ import pytest
 from decimal import Decimal
 from app.services.tasks.sizing import compute_position_size
 
-@pytest.mark.unit
 class TestSizing:
     def test_invalid_distance_returns_not_ok(self):
         res = compute_position_size(

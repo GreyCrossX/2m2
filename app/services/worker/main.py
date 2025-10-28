@@ -19,9 +19,11 @@ from .config import Config
 from .core.poller import WorkerPoller
 from .core.router import SymbolRouter
 from .domain.models import BotConfig
-from .infrastructure.binance.account import BinanceAccount
-from .infrastructure.binance.client import BinanceClient
-from .infrastructure.binance.trading import BinanceTrading
+from app.services.infrastructure.binance import (
+    BinanceAccount,
+    BinanceClient,
+    BinanceTrading,
+)
 from .infrastructure.cache.balance_cache import BalanceCache
 from .infrastructure.postgres.order_states import OrderGateway
 from .infrastructure.postgres.repositories import BotRepository, CredentialRepository

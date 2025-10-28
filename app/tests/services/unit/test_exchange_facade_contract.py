@@ -89,7 +89,6 @@ def _isolate_exchange(monkeypatch):
     yield exchange, calls
 
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_new_order_maps_fields_correctly(_isolate_exchange):
     exchange, calls = _isolate_exchange
@@ -125,7 +124,6 @@ def test_new_order_maps_fields_correctly(_isolate_exchange):
     assert sent["priceProtect"] is True
 
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_cancel_open_positions_leverage_margin(_isolate_exchange):
     exchange, calls = _isolate_exchange
@@ -143,7 +141,6 @@ def test_cancel_open_positions_leverage_margin(_isolate_exchange):
     assert calls["change_margin"][-1] == {"symbol": "BTCUSDT", "marginType": "ISOLATED"}
 
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_new_order_error_passthrough(_isolate_exchange, monkeypatch):
     exchange, _calls = _isolate_exchange
@@ -169,7 +166,6 @@ def test_new_order_error_passthrough(_isolate_exchange, monkeypatch):
     assert "sdk exploded" in out["error"]
 
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_new_order_limit_with_price_and_tif_drops_nones(_isolate_exchange):
     """
@@ -212,7 +208,6 @@ def test_new_order_limit_with_price_and_tif_drops_nones(_isolate_exchange):
         assert k not in sent
 
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_new_order_stop_and_take_profit_limit_mapping(_isolate_exchange):
     """
@@ -258,7 +253,6 @@ def test_new_order_stop_and_take_profit_limit_mapping(_isolate_exchange):
     assert sent2["price"] == 98.30
     assert sent2["timeInForce"] == "GTC"
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_market_variants_drop_price_tif_even_if_provided(_isolate_exchange):
     """
@@ -313,7 +307,6 @@ def test_market_variants_drop_price_tif_even_if_provided(_isolate_exchange):
     assert "timeInForce" not in sent2
 
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_cancel_by_client_order_id_maps_correctly(_isolate_exchange):
     """
@@ -336,7 +329,6 @@ def test_cancel_by_client_order_id_maps_correctly(_isolate_exchange):
 import types
 import pytest
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_limit_includes_price_and_tif_omits_stopprice(_isolate_exchange):
     """
@@ -365,7 +357,6 @@ def test_limit_includes_price_and_tif_omits_stopprice(_isolate_exchange):
     assert "stopPrice" not in sent
 
 
-@pytest.mark.unit
 @pytest.mark.exchange
 def test_set_creds_lookup_is_used_and_cache_cleared(_isolate_exchange, monkeypatch):
     """

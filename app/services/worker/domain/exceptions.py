@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from app.services.domain.exceptions import (
+    DomainAuthError,
+    DomainBadRequest,
+    DomainExchangeDown,
+    DomainExchangeError,
+    DomainRateLimit,
+)
+
 
 class WorkerException(Exception):
     """Base exception for Worker domain errors."""
@@ -17,25 +25,18 @@ class BinanceAPIException(WorkerException):
     """Raised when Binance API returns an error that should surface to the application."""
 
 
-class DomainExchangeError(WorkerException):
-    """Base class for normalized exchange failures from infrastructure adapters."""
-
-
-class DomainBadRequest(DomainExchangeError):
-    """The exchange rejected the request due to invalid parameters."""
-
-
-class DomainAuthError(DomainExchangeError):
-    """Authentication failed (bad key/secret or insufficient permissions)."""
-
-
-class DomainRateLimit(DomainExchangeError):
-    """Exchange rate limits exceeded; caller should retry with backoff."""
-
-
-class DomainExchangeDown(DomainExchangeError):
-    """Exchange is unavailable (5xx, network issues, etc.)."""
-
-
 class OrderNotFoundException(WorkerException):
     """Raised when an order expected to exist cannot be found."""
+
+__all__ = [
+    "WorkerException",
+    "InsufficientBalanceException",
+    "InvalidSignalException",
+    "BinanceAPIException",
+    "OrderNotFoundException",
+    "DomainBadRequest",
+    "DomainAuthError",
+    "DomainRateLimit",
+    "DomainExchangeDown",
+    "DomainExchangeError",
+]
