@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Sequence
 from uuid import UUID
 
 from sqlalchemy import insert, select, update
@@ -79,14 +79,20 @@ class OrderGateway:
                 else:
                     await session.execute(insert(OrderStateRecord).values(**payload))
 
-    async def list_pending_order_states(self, bot_id: UUID, symbol: str) -> List[OrderState]:
+    async def list_pending_order_states(
+        self,
+        bot_id: UUID,
+        symbol: str,
+        side: Side,
+        statuses: Optional[Sequence[OrderStatus]] = None,
+    ) -> List[OrderState]:
         async with self._session_factory() as session:
+            active_statuses = tuple(statuses or (OrderStatus.PENDING, OrderStatus.ARMED))
             stmt = select(OrderStateRecord).where(
                 OrderStateRecord.bot_id == bot_id,
                 OrderStateRecord.symbol == symbol,
-                OrderStateRecord.status.in_(
-                    [OrderStatus.PENDING.value, OrderStatus.ARMED.value]
-                ),
+                OrderStateRecord.side == side.value,
+                OrderStateRecord.status.in_([status.value for status in active_statuses]),
             )
             res = await session.execute(stmt)
             return [_to_domain(r) for r in res.scalars().all()]
