@@ -32,10 +32,12 @@ class BinanceAccount:
         client = await self._get_client(cred_id, env)
         acct = await client.account()
         init_margin = acct.get("totalInitialMargin")
+        if init_margin is None:
+            init_margin = acct.get("total_initial_margin")
         if init_margin is not None:
             return Decimal(str(init_margin))
 
-        risks = await client.position_risk()
+        risks = await client.position_information()
         used = Decimal("0")
         for r in risks:
             try:

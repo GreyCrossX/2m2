@@ -6,7 +6,7 @@ from uuid import UUID
 
 from ..domain.models import ArmSignal, BotConfig, OrderState
 from ..domain.enums import OrderStatus, Side
-from ..domain.exceptions import BinanceAPIException
+from ..domain.exceptions import BinanceAPIException, DomainExchangeError
 
 
 # --------- Ports (to be implemented by Infra) ---------
@@ -19,12 +19,18 @@ class BalanceValidatorPort(Protocol):
 class TradingPort(Protocol):
     """Subset of infrastructure/binance/trading.BinanceTrading we need."""
     async def set_leverage(self, symbol: str, leverage: int) -> None: ...
+    async def quantize_limit_order(
+        self,
+        symbol: str,
+        quantity: Decimal,
+        price: Decimal,
+    ) -> tuple[Decimal, Decimal | None]: ...
     async def create_limit_order(
         self,
         symbol: str,
         side: Side,              # domain enum
-        quantity: Decimal,       # infra will quantize/round
-        price: Decimal,          # infra will quantize/round
+        quantity: Decimal,
+        price: Decimal,
         reduce_only: bool = False,
         time_in_force: str = "GTC",
         new_client_order_id: Optional[str] = None,
@@ -109,16 +115,36 @@ class OrderExecutor:
         trading = await self._get_trading(bot)
         await trading.set_leverage(signal.symbol, bot.leverage)
 
-        # --- 3) Place limit order (infra handles precision/filters)
+        # --- 3) Quantize order to exchange constraints
+        q_qty, q_price = await trading.quantize_limit_order(signal.symbol, qty, signal.trigger)
+        if q_qty <= 0 or q_price is None or q_price <= 0:
+            return OrderState(
+                bot_id=bot.id,
+                signal_id="",
+                status=OrderStatus.FAILED,
+                side=signal.side,
+                symbol=signal.symbol,
+                trigger_price=q_price or Decimal("0"),
+                stop_price=signal.stop,
+                quantity=Decimal("0"),
+            )
+
+        # --- 4) Place limit order (infra handles retries/error mapping)
         try:
             resp = await trading.create_limit_order(
                 symbol=signal.symbol,
                 side=signal.side,          # pass domain enum; infra maps to BUY/SELL
-                quantity=qty,
-                price=signal.trigger,
+                quantity=q_qty,
+                price=q_price,
                 reduce_only=False,
                 time_in_force="GTC",
             )
+        except DomainExchangeError as exc:
+            diagnostics = (
+                f"create_limit_order failed: {exc} | symbol={signal.symbol} "
+                f"raw_qty={qty} q_qty={q_qty} q_price={q_price}"
+            )
+            raise BinanceAPIException(diagnostics) from exc
         except Exception as exc:
             raise BinanceAPIException(f"create_limit_order failed: {exc}") from exc
 
@@ -129,9 +155,9 @@ class OrderExecutor:
             status=OrderStatus.PENDING,
             side=signal.side,
             symbol=signal.symbol,
-            trigger_price=signal.trigger,
+            trigger_price=q_price,
             stop_price=signal.stop,
-            quantity=qty,
+            quantity=q_qty,
             order_id=order_id,
         )
 
