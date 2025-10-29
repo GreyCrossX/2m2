@@ -1,3 +1,4 @@
+# app/db/models/order_states.py
 from __future__ import annotations
 
 from uuid import uuid4
@@ -17,7 +18,6 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 
 from app.db.base import Base
 
-
 _ORDER_STATUS_VALUES = (
     "armed",
     "pending",
@@ -27,6 +27,9 @@ _ORDER_STATUS_VALUES = (
     "skipped_low_balance",
     "skipped_whitelist",
 )
+
+# NEW: dedicated enum for order side (NO "both" here)
+_ORDER_SIDE_VALUES = ("long", "short")
 
 
 class OrderStateRecord(Base):
@@ -41,6 +44,7 @@ class OrderStateRecord(Base):
         nullable=False,
         index=True,
     )
+    # Redis stream message id (not a UUID)
     signal_id = Column(String(64), nullable=False)
     order_id = Column(BigInteger, nullable=True)
 
@@ -48,10 +52,12 @@ class OrderStateRecord(Base):
         SAEnum(*_ORDER_STATUS_VALUES, name="order_status_enum", create_type=False),
         nullable=False,
     )
+    # ✅ use a dedicated enum for order sides
     side = Column(
-        SAEnum("long", "short", "both", name="side_whitelist_enum", create_type=False),
+        SAEnum(*_ORDER_SIDE_VALUES, name="order_side_enum", create_type=False),
         nullable=False,
     )
+
     symbol = Column(String(32), nullable=False, index=True)
 
     trigger_price = Column(Numeric(18, 8), nullable=False)
@@ -73,4 +79,3 @@ class OrderStateRecord(Base):
     __table_args__ = (
         UniqueConstraint("bot_id", "signal_id", name="uq_orderstate_bot_signal"),
     )
-

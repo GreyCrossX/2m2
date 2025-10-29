@@ -1,29 +1,25 @@
-# app/scripts/get_balance.py
+# app/scripts/get_balance_for_bot.py
 from __future__ import annotations
-import os, time, hmac, hashlib, json, logging, urllib.parse, urllib.request
-from typing import Any, Dict, List, Tuple
-
-BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() in ("1","true","yes","y")
-API_KEY    = os.getenv("BINANCE_USDSF_API_KEY", "")
-API_SECRET = os.getenv("BINANCE_USDSF_API_SECRET", "")
-
-SPOT_API = os.getenv(
-    "BINANCE_SPOT_BASE_URL",
-    "https://api.binance.com" if not BINANCE_TESTNET else "https://testnet.binance.vision",
-)
-UM_API   = os.getenv(
-    "BINANCE_USDSF_BASE_URL",
-    "https://fapi.binance.com" if not BINANCE_TESTNET else "https://testnet.binancefuture.com",
-)
-CM_API   = os.getenv(
-    "BINANCE_COINMF_BASE_URL",
-    "https://dapi.binance.com" if not BINANCE_TESTNET else "https://testnet.binancefuture.com/dapi",
-)
-
-RECV_WINDOW = int(os.getenv("BINANCE_RECV_WINDOW", "5000"))
+import os, time, hmac, hashlib, json, logging, urllib.parse, urllib.request, argparse, asyncio
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple, Optional
+from uuid import UUID
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 log = logging.getLogger("wallets")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Context (per-bot credentials + endpoints)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Ctx:
+    api_key: str
+    api_secret: str
+    spot_api: str
+    um_api: str
+    cm_api: str
+    recv_window: int = 5000
 
 def _mask(s: str) -> str:
     return "" if not s else f"{s[:6]}…{s[-4:]}"
@@ -31,20 +27,20 @@ def _mask(s: str) -> str:
 def _ts_ms() -> int:
     return int(time.time() * 1000)
 
-def _sign(params: Dict[str, Any]) -> str:
+def _sign(ctx: Ctx, params: Dict[str, Any]) -> str:
     q = urllib.parse.urlencode(params, doseq=True)
-    sig = hmac.new(API_SECRET.encode(), q.encode(), hashlib.sha256).hexdigest()
+    sig = hmac.new(ctx.api_secret.encode(), q.encode(), hashlib.sha256).hexdigest()
     return f"{q}&signature={sig}"
 
-def _request(method: str, base: str, path: str, *, signed=False, params=None, timeout=20) -> Tuple[Any, Dict[str,str] | None]:
+def _request(ctx: Ctx, method: str, base: str, path: str, *, signed=False, params=None, timeout=20) -> Tuple[Any, Dict[str,str] | None]:
     params = params or {}
-    headers = {"X-MBX-APIKEY": API_KEY} if API_KEY else {}
+    headers = {"X-MBX-APIKEY": ctx.api_key} if ctx.api_key else {}
     url = f"{base}{path}"
 
     if signed:
-        params.setdefault("recvWindow", RECV_WINDOW)
+        params.setdefault("recvWindow", ctx.recv_window)
         params.setdefault("timestamp", _ts_ms())
-        body = _sign(params)
+        body = _sign(ctx, params)
     else:
         body = urllib.parse.urlencode(params, doseq=True)
 
@@ -63,7 +59,6 @@ def _request(method: str, base: str, path: str, *, signed=False, params=None, ti
             try:
                 return json.loads(txt), hdrs
             except Exception:
-                # endpoints sometimes return bare arrays/strings
                 return txt, hdrs
     except urllib.error.HTTPError as e:
         err = e.read().decode("utf-8", errors="replace")
@@ -86,11 +81,38 @@ def _nz_assets(rows: List[Dict[str, Any]], fields=("free","locked")) -> List[Dic
             pass
     return out
 
-# ─────────── Spot / Funding ───────────
-def spot_balances() -> List[Dict[str, Any]]:
-    # MUST be POST (signed)
+# ──────────────────────────────────────────────────────────────────────────────
+# Endpoints (by env)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _urls_for_env(env_name: str) -> tuple[str, str, str]:
+    """
+    env_name: "prod" | "testnet" (case-insensitive)
+    Override with env vars if you like.
+    """
+    is_testnet = str(env_name).lower().strip() == "testnet"
+
+    spot = os.getenv(
+        "BINANCE_SPOT_BASE_URL",
+        "https://api.binance.com" if not is_testnet else "https://testnet.binance.vision",
+    )
+    um   = os.getenv(
+        "BINANCE_USDSF_BASE_URL",
+        "https://fapi.binance.com" if not is_testnet else "https://testnet.binancefuture.com",
+    )
+    cm   = os.getenv(
+        "BINANCE_COINMF_BASE_URL",
+        "https://dapi.binance.com" if not is_testnet else "https://testnet.binancefuture.com/dapi",
+    )
+    return spot, um, cm
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Spot / Funding
+# ──────────────────────────────────────────────────────────────────────────────
+
+def spot_balances(ctx: Ctx) -> List[Dict[str, Any]]:
     try:
-        data, _ = _request("POST", SPOT_API, "/sapi/v3/asset/getUserAsset", signed=True,
+        data, _ = _request(ctx, "POST", ctx.spot_api, "/sapi/v3/asset/getUserAsset", signed=True,
                            params={"needBtcValuation":"false"})
         err, msg = _has_error(data)
         if err:
@@ -101,9 +123,9 @@ def spot_balances() -> List[Dict[str, Any]]:
         log.warning(f"Spot balances error: {e}")
         return []
 
-def funding_balances() -> List[Dict[str, Any]]:
+def funding_balances(ctx: Ctx) -> List[Dict[str, Any]]:
     try:
-        data, _ = _request("POST", SPOT_API, "/sapi/v1/asset/get-funding-asset", signed=True, params={})
+        data, _ = _request(ctx, "POST", ctx.spot_api, "/sapi/v1/asset/get-funding-asset", signed=True, params={})
         err, msg = _has_error(data)
         if err:
             log.warning(f"Funding wallet error: {msg}")
@@ -113,11 +135,14 @@ def funding_balances() -> List[Dict[str, Any]]:
         log.warning(f"Funding wallet error: {e}")
         return []
 
-# ─────────── USDS-M Futures ───────────
-def um_futures_overview() -> Dict[str, Any]:
+# ──────────────────────────────────────────────────────────────────────────────
+# USDS-M Futures
+# ──────────────────────────────────────────────────────────────────────────────
+
+def um_futures_overview(ctx: Ctx) -> Dict[str, Any]:
     out = {"account": {}, "balances": []}
     try:
-        acct, _ = _request("GET", UM_API, "/fapi/v2/account", signed=True)
+        acct, _ = _request(ctx, "GET", ctx.um_api, "/fapi/v2/account", signed=True)
         err, msg = _has_error(acct)
         if err:
             log.error(f"UM /fapi/v2/account error: {msg}")
@@ -127,7 +152,7 @@ def um_futures_overview() -> Dict[str, Any]:
         log.error(f"UM /fapi/v2/account error: {e}")
 
     try:
-        bals, _ = _request("GET", UM_API, "/fapi/v2/balance", signed=True)
+        bals, _ = _request(ctx, "GET", ctx.um_api, "/fapi/v2/balance", signed=True)
         err, msg = _has_error(bals)
         if err:
             log.error(f"UM /fapi/v2/balance error: {msg}")
@@ -137,11 +162,14 @@ def um_futures_overview() -> Dict[str, Any]:
         log.error(f"UM /fapi/v2/balance error: {e}")
     return out
 
-# ─────────── COIN-M Futures ───────────
-def cm_futures_overview() -> Dict[str, Any]:
+# ──────────────────────────────────────────────────────────────────────────────
+# COIN-M Futures
+# ──────────────────────────────────────────────────────────────────────────────
+
+def cm_futures_overview(ctx: Ctx) -> Dict[str, Any]:
     out = {"account": {}, "balances": []}
     try:
-        acct, _ = _request("GET", CM_API, "/dapi/v1/account", signed=True)
+        acct, _ = _request(ctx, "GET", ctx.cm_api, "/dapi/v1/account", signed=True)
         err, msg = _has_error(acct)
         if err:
             log.error(f"CM /dapi/v1/account error: {msg}")
@@ -151,7 +179,7 @@ def cm_futures_overview() -> Dict[str, Any]:
         log.error(f"CM /dapi/v1/account error: {e}")
 
     try:
-        bals, _ = _request("GET", CM_API, "/dapi/v1/balance", signed=True)
+        bals, _ = _request(ctx, "GET", ctx.cm_api, "/dapi/v1/balance", signed=True)
         err, msg = _has_error(bals)
         if err:
             log.error(f"CM /dapi/v1/balance error: {msg}")
@@ -162,31 +190,89 @@ def cm_futures_overview() -> Dict[str, Any]:
     return out
 
 def _fmt_usd(x: Any) -> str:
-    try: return f"{float(x):,.2f}"
-    except: return str(x)
+    try:
+        return f"{float(x):,.2f}"
+    except Exception:
+        return str(x)
 
-def main():
-    env = "TESTNET" if BINANCE_TESTNET else "PROD"
+# ──────────────────────────────────────────────────────────────────────────────
+# Bot credential loader (from DB) with safe fallbacks
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _load_bot_credentials(bot_id: UUID) -> tuple[str, str, str]:
+    """
+    Returns (env, api_key, api_secret) for the bot.
+    Uses your repository if available; otherwise raises.
+    """
+    # Preferred path: reuse your repository adapter
+    try:
+        from app.services.worker.infrastructure.postgres.repositories import BotRepository  # your file earlier
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+        from app.db.session import async_session_factory  # <- adjust if your project exposes it differently
+
+        if not isinstance(async_session_factory, async_sessionmaker):
+            raise RuntimeError("async_session_factory missing or invalid")
+
+        repo = BotRepository(async_session_factory)
+        bot_cfg, api_key, api_secret = await repo.get_bot_credentials(bot_id)
+        return bot_cfg.env, api_key, api_secret
+    except Exception as e:
+        # Fallback: environment variables
+        raise RuntimeError(
+            "Could not load bot credentials from DB. "
+            "Ensure repositories and session factory are importable, or provide API key/secret via env."
+        ) from e
+
+def _ctx_from_env_fallback() -> Ctx:
+    """
+    Back-compat: if DB path fails, read env like the old script did.
+    """
+    is_testnet = os.getenv("BINANCE_TESTNET", "false").lower() in ("1","true","yes","y")
+    api_key    = os.getenv("BINANCE_USDSF_API_KEY", "")
+    api_secret = os.getenv("BINANCE_USDSF_API_SECRET", "")
+    if not api_key or not api_secret:
+        raise SystemExit("Missing API key/secret. Set BINANCE_USDSF_API_KEY / BINANCE_USDSF_API_SECRET or use --bot-id.")
+    spot, um, cm = _urls_for_env("testnet" if is_testnet else "prod")
+    return Ctx(api_key=api_key, api_secret=api_secret, spot_api=spot, um_api=um, cm_api=cm,
+               recv_window=int(os.getenv("BINANCE_RECV_WINDOW", "5000")))
+
+async def build_ctx(bot_id: Optional[str], override_env: Optional[str]) -> Ctx:
+    if not bot_id:
+        return _ctx_from_env_fallback()
+
+    env_name, api_key, api_secret = await _load_bot_credentials(UUID(bot_id))
+    # Allow manual override if provided (rare)
+    env_eff = (override_env or env_name).lower().strip()
+    spot, um, cm = _urls_for_env(env_eff)
+    recv_window = int(os.getenv("BINANCE_RECV_WINDOW", "5000"))
+    return Ctx(api_key=api_key, api_secret=api_secret, spot_api=spot, um_api=um, cm_api=cm, recv_window=recv_window)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _print_overview(ctx: Ctx, env_label: str) -> None:
     log.info("=== Binance Wallets Probe ===")
-    log.info(f"Env         : {env}")
-    log.info(f"Spot URL    : {SPOT_API}")
-    log.info(f"UM URL      : {UM_API}")
-    log.info(f"CM URL      : {CM_API}")
-    log.info(f"API key     : {_mask(API_KEY)}")
-    log.info(f"Secret set  : {'<set>' if API_SECRET else '<missing>'}")
+    log.info(f"Env         : {env_label}")
+    log.info(f"Spot URL    : {ctx.spot_api}")
+    log.info(f"UM URL      : {ctx.um_api}")
+    log.info(f"CM URL      : {ctx.cm_api}")
+    log.info(f"API key     : {_mask(ctx.api_key)}")
+    log.info(f"Secret set  : {'<set>' if ctx.api_secret else '<missing>'}")
 
+def run_probe(ctx: Ctx) -> None:
     # Spot
-    spot = spot_balances()
+    spot = spot_balances(ctx)
     nz = _nz_assets(spot, ("free","locked"))
     if nz:
         log.info("— Spot non-zero assets —")
         for a in nz:
-            log.info(f"  {a.get('asset')}: free={a.get('free')} locked]={a.get('locked')}")
+            log.info(f"  {a.get('asset')}: free={a.get('free')} locked={a.get('locked')}")
     else:
         log.warning("Spot wallet: EMPTY or unavailable")
 
     # Funding
-    funding = funding_balances()
+    funding = funding_balances(ctx)
     shown = 0
     for a in (funding or []):
         asset = a.get("asset")
@@ -204,7 +290,7 @@ def main():
         log.warning("Funding wallet: no non-zero assets")
 
     # UM Futures
-    um = um_futures_overview()
+    um = um_futures_overview(ctx)
     acct = um.get("account") or {}
     if acct:
         twb = acct.get("totalWalletBalance", "")
@@ -232,7 +318,7 @@ def main():
         log.warning("UM Futures: no non-zero per-asset balances")
 
     # CM Futures
-    cm = cm_futures_overview()
+    cm = cm_futures_overview(ctx)
     cacct = cm.get("account") or {}
     if cacct:
         twb = cacct.get("totalWalletBalance", "")
@@ -257,8 +343,18 @@ def main():
     else:
         log.warning("COIN-M Futures: no non-zero per-asset balances")
 
+async def _amain(bot_id: Optional[str], override_env: Optional[str]) -> None:
+    ctx = await build_ctx(bot_id, override_env)
+    env_label = (override_env or ("TESTNET" if "testnet" in ctx.um_api else "PROD")).upper()
+    _print_overview(ctx, env_label)
+    run_probe(ctx)
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Probe balances using a bot's credentials.")
+    parser.add_argument("--bot-id", help="Bot UUID to fetch credentials/env from DB (preferred).")
+    parser.add_argument("--env", help="Override env for endpoints: prod|testnet (optional).")
+    args = parser.parse_args()
+    asyncio.run(_amain(args.bot_id, args.env))
+
 if __name__ == "__main__":
-    if not API_KEY or not API_SECRET:
-        log.error("Missing API key/secret envs. Set BINANCE_USDSF_API_KEY and BINANCE_USDSF_API_SECRET.")
-        raise SystemExit(2)
     main()
