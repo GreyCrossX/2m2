@@ -41,6 +41,19 @@ class OrderSide(str, Enum):
         except Exception:
             return cls(str(value))
 
+    def exit_side(self) -> "OrderSide":
+        """Return the side that would close/reduce a position opened on ``self``."""
+        if self == OrderSide.LONG:
+            return OrderSide.SHORT
+        if self == OrderSide.SHORT:
+            return OrderSide.LONG
+        raise ValueError(f"Unsupported order side: {self}")
+
+
+def exit_side_for(entry_side: OrderSide) -> OrderSide:
+    """Helper function mirroring :meth:`OrderSide.exit_side` for functional use."""
+    return entry_side.exit_side()
+
 
 class SideWhitelist(str, Enum):
     """

@@ -17,6 +17,7 @@ class SignalGenerator:
 
     def __post_init__(self) -> None:
         self._prev_regime: Optional[Regime] = None
+        self._active_arm: Optional[ArmSignal] = None
         logger.info("SignalGenerator initialized | tick_size=%s version=%s", self.tick_size, self.version)
 
     # NEW: helper to build ARM signals (keeps logic in one place)
@@ -108,17 +109,57 @@ class SignalGenerator:
             logger.debug("No signal (first candle) | sym=%s regime=%s", sym, regime)
             return out
 
-        # No change -> no signal
+        # No change -> no signal unless a new indicator candle arrives for an active ARM
         if regime == prev:
-            logger.debug("No signal (same regime) | sym=%s regime=%s", sym, regime)
+            if regime in ("long", "short") and self._active_arm and self._active_arm.side == regime:
+                if ind_ts != self._active_arm.ind_ts:
+                    logger.info(
+                        "Indicator candle update detected | sym=%s tf=%s prev_ind_ts=%s new_ind_ts=%s side=%s",
+                        sym,
+                        tf,
+                        self._active_arm.ind_ts,
+                        ind_ts,
+                        regime,
+                    )
+                    out.append(self._disarm(
+                        sym=sym,
+                        tf=tf,
+                        now_ts=now_ts,
+                        prev_side=self._active_arm.side,
+                        new_regime=regime,
+                        reason="update_pending",
+                    ))
+                    new_arm = self._arm(
+                        sym=sym,
+                        tf=tf,
+                        now_ts=now_ts,
+                        side=regime,
+                        ind_ts=ind_ts,
+                        ind_high=ind_high,
+                        ind_low=ind_low,
+                    )
+                    out.append(new_arm)
+                    self._active_arm = new_arm
+                else:
+                    logger.debug(
+                        "No signal (same regime/indicator) | sym=%s regime=%s ind_ts=%s",
+                        sym,
+                        regime,
+                        ind_ts,
+                    )
+            else:
+                logger.debug("No signal (same regime, no active ARM) | sym=%s regime=%s", sym, regime)
+            self._prev_regime = regime
             return out
 
         # neutral -> long/short: ARM
         if prev == "neutral" and regime in ("long", "short"):
-            out.append(self._arm(
+            new_arm = self._arm(
                 sym=sym, tf=tf, now_ts=now_ts, side=regime,
                 ind_ts=ind_ts, ind_high=ind_high, ind_low=ind_low
-            ))
+            )
+            self._active_arm = new_arm
+            out.append(new_arm)
 
         # long/short -> neutral: DISARM
         elif prev in ("long", "short") and regime == "neutral":
@@ -126,6 +167,7 @@ class SignalGenerator:
                 sym=sym, tf=tf, now_ts=now_ts, prev_side=prev,
                 new_regime=regime, reason=f"regime:{prev}->neutral"
             ))
+            self._active_arm = None
 
         # NEW: direct flip long <-> short: DISARM(prev) THEN ARM(new)
         elif prev in ("long", "short") and regime in ("long", "short") and prev != regime:
@@ -133,12 +175,16 @@ class SignalGenerator:
                 sym=sym, tf=tf, now_ts=now_ts, prev_side=prev,
                 new_regime=regime, reason=f"flip:{prev}->{regime}"
             ))
-            out.append(self._arm(
+            new_arm = self._arm(
                 sym=sym, tf=tf, now_ts=now_ts, side=regime,
                 ind_ts=ind_ts, ind_high=ind_high, ind_low=ind_low
-            ))
+            )
+            self._active_arm = new_arm
+            out.append(new_arm)
 
         self._prev_regime = regime
+        if regime == "neutral" and not out:
+            self._active_arm = None
         return out
 
     # NEW: compatibility shim (optional) — preserves old single-object API if still used elsewhere
