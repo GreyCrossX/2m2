@@ -52,6 +52,9 @@ class Config:
     binance_connector: str  # "modular" (default)
     # (we derive testnet/prod from bot/env + creds)
 
+    # Execution mode
+    dry_run_mode: bool
+
     @classmethod
     def from_env(cls) -> "Config":
         syms = [s.strip().upper() for s in _env("WORKER_SYMBOLS", "BTCUSDT").split(",") if s.strip()]
@@ -67,4 +70,5 @@ class Config:
             router_refresh_seconds=_env_int("ROUTER_REFRESH_SECONDS", 60),
             balance_ttl_seconds=_env_int("BALANCE_TTL_SECONDS", 30),
             binance_connector=_env("BINANCE_CONNECTOR", "modular"),
+            dry_run_mode=_env_bool("DRY_RUN_MODE", False),
         )
