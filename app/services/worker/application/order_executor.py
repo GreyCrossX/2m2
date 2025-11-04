@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_CEILING
 from typing import Awaitable, Callable, Optional, Protocol
 from uuid import UUID
 
@@ -21,12 +21,14 @@ class BalanceValidatorPort(Protocol):
 class TradingPort(Protocol):
     """Subset of infrastructure/binance/trading.BinanceTrading we need."""
     async def set_leverage(self, symbol: str, leverage: int) -> None: ...
+
     async def quantize_limit_order(
         self,
         symbol: str,
         quantity: Decimal,
         price: Decimal,
     ) -> tuple[Decimal, Decimal | None]: ...
+
     async def create_limit_order(
         self,
         symbol: str,
@@ -38,6 +40,22 @@ class TradingPort(Protocol):
         new_client_order_id: Optional[str] = None,
     ) -> dict: ...
 
+    # explicit TP-LIMIT order
+    async def create_take_profit_limit(
+        self,
+        symbol: str,
+        side: OrderSide,        # opposite of entry
+        quantity: Decimal,
+        price: Decimal,         # limit price
+        stop_price: Decimal,    # TP trigger; for TP-LIMIT it's normally equal to price
+        reduce_only: bool = True,
+        time_in_force: str = "GTC",
+        new_client_order_id: Optional[str] = None,
+    ) -> dict: ...
+
+    # NEW: filters for minNotional/LOT_SIZE cache
+    async def get_symbol_filters(self, symbol: str) -> dict: ...
+
 
 class PositionManagerPort(Protocol):
     """Reserved for future fill/position notifications from WS."""
@@ -46,13 +64,25 @@ class PositionManagerPort(Protocol):
 
 # --------- Use Case ---------
 
+Q_STEP = Decimal("0.001")  # hard 3-decimal precision for qty (per requirement)
+NOTIONAL_FALLBACK = Decimal("20")  # safety default if filters missing
+
+def _floor3(x: Decimal) -> Decimal:
+    return (x / Q_STEP).to_integral_value(rounding=ROUND_FLOOR) * Q_STEP
+
+def _ceil3(x: Decimal) -> Decimal:
+    return (x / Q_STEP).to_integral_value(rounding=ROUND_CEILING) * Q_STEP
+
+
 class OrderExecutor:
     """
-    Creates a limit order after validating balance and computing size.
+    Creates a limit order after validating balance and computing size,
+    then places a TAKE_PROFIT_LIMIT reduce-only order.
 
     Notes:
     - Position sizing stays here (domain logic).
     - Exchange-specific rounding/tick/step filtering happens in infra TradingPort.
+    - We also perform a pre-flight min-notional bump (3 dp) and re-validate margin.
     """
 
     def __init__(
@@ -76,6 +106,64 @@ class OrderExecutor:
         if self.trading_factory is None:
             raise RuntimeError("OrderExecutor.trading_factory not configured and no binance_client provided")
         return await self.trading_factory(bot)
+
+    # --- TP math ---
+    def _compute_tp_price(self, side: OrderSide, trigger: Decimal, stop: Decimal) -> Decimal:
+        """
+        TP distance = tp_r_multiple × |trigger - stop|.
+        - LONG:  TP = trigger + (trigger - stop) * R
+        - SHORT: TP = trigger - (stop - trigger) * R
+        """
+        r = self._tp_r
+        if side == OrderSide.LONG:
+            distance = (trigger - stop) * r
+            return trigger + distance
+        else:
+            distance = (stop - trigger) * r
+            return trigger - distance
+
+    async def _min_notional_for(self, trading: TradingPort, symbol: str) -> Decimal:
+        f = await trading.get_symbol_filters(symbol)
+        mn = (f.get("MIN_NOTIONAL") or f.get("NOTIONAL") or {})
+        mn_val = mn.get("notional") or mn.get("minNotional") or mn.get("minNotionalValue")
+        try:
+            return Decimal(str(mn_val)) if mn_val not in (None, "", "0") else NOTIONAL_FALLBACK
+        except Exception:
+            return NOTIONAL_FALLBACK
+
+    async def _preflight_qty(
+        self,
+        trading: TradingPort,
+        symbol: str,
+        raw_qty: Decimal,
+        price: Decimal,
+        lev: Decimal,
+        balance_free: Decimal,
+    ) -> tuple[bool, Decimal, str | None]:
+        """
+        Enforce 3dp qty and min-notional; re-check margin after bump.
+        Returns (ok, q_qty, reason_if_not_ok)
+        """
+        q_qty = _floor3(raw_qty)
+        min_notional = await self._min_notional_for(trading, symbol)
+        notional = q_qty * price
+        if notional < min_notional:
+            min_qty = _ceil3(min_notional / price)
+            q_qty = min_qty
+
+        required_margin = (q_qty * price) / lev
+        if required_margin > balance_free:
+            return (False, q_qty, f"insufficient_margin_after_min_notional(required={required_margin}, free={balance_free})")
+
+        if q_qty <= 0:
+            return (False, q_qty, "qty_zero_after_round")
+
+        log.info(
+            "[preflight] sym=%s raw_qty=%s q_qty=%s price=%s min_notional=%s notional=%s lev=%s req_margin=%s free=%s",
+            symbol, str(raw_qty), str(q_qty), str(price), str(min_notional),
+            str(q_qty * price), str(lev), str(required_margin), str(balance_free),
+        )
+        return (True, q_qty, None)
 
     async def execute_order(
         self,
@@ -141,7 +229,7 @@ class OrderExecutor:
             str(qty), str(signal.trigger), str(exposure), leverage, str(required_margin),
         )
 
-        # --- 3) Validate balance (uses same source as get_available_balance under the hood)
+        # --- 3) Validate balance
         is_ok, avail_check = await self._bal.validate_balance(bot, required_margin)
         log.info("[balance] available=%s required=%s pass=%s", str(avail_check), str(required_margin), is_ok)
         if not is_ok:
@@ -156,11 +244,11 @@ class OrderExecutor:
                 quantity=Decimal("0"),
             )
 
-        # --- 4) Get trading port (from factory or prewired), set leverage idempotently
+        # --- 4) Get trading port, set leverage idempotently
         trading = await self._get_trading(bot)
         try:
             await trading.set_leverage(signal.symbol, bot.leverage)
-        except Exception as exc:
+        except Exception:
             log.exception("set_leverage failed | sym=%s lev=%s", signal.symbol, bot.leverage)
             return OrderState(
                 bot_id=bot.id,
@@ -173,12 +261,32 @@ class OrderExecutor:
                 quantity=Decimal("0"),
             )
 
-        # --- 5) Quantize order to exchange constraints
-        q_qty, q_price = await trading.quantize_limit_order(signal.symbol, qty, signal.trigger)
+        # --- 5) Pre-flight: enforce 3dp & min-notional bump, re-check margin
+        balance_free = await self._bal.get_available_balance(bot.cred_id, bot.env)
+        lev_d = Decimal(str(leverage))
+        ok_pf, q_qty_pf, reason_pf = await self._preflight_qty(
+            trading, signal.symbol, qty, signal.trigger, lev_d, balance_free
+        )
+        if not ok_pf:
+            log.info("Preflight failed | sym=%s reason=%s", signal.symbol, reason_pf)
+            status = OrderStatus.SKIPPED_LOW_BALANCE if "insufficient_margin" in (reason_pf or "") else OrderStatus.FAILED
+            return OrderState(
+                bot_id=bot.id,
+                signal_id="",
+                status=status,
+                side=signal.side,
+                symbol=signal.symbol,
+                trigger_price=signal.trigger,
+                stop_price=signal.stop,
+                quantity=Decimal("0"),
+            )
+
+        # --- 6) Quantize ENTRY (exchange ticks), price may adjust; qty should still meet notional
+        q_qty, q_price = await trading.quantize_limit_order(signal.symbol, q_qty_pf, signal.trigger)
         if q_qty <= 0 or q_price is None or q_price <= 0:
             log.error(
-                "Quantization invalid | sym=%s raw_qty=%s raw_price=%s -> q_qty=%s q_price=%s",
-                signal.symbol, str(qty), str(signal.trigger), str(q_qty), str(q_price),
+                "Quantization invalid | sym=%s raw_qty=%s pf_qty=%s raw_price=%s -> q_qty=%s q_price=%s",
+                signal.symbol, str(qty), str(q_qty_pf), str(signal.trigger), str(q_qty), str(q_price),
             )
             return OrderState(
                 bot_id=bot.id,
@@ -191,11 +299,11 @@ class OrderExecutor:
                 quantity=Decimal("0"),
             )
 
-        # --- 6) Place limit order (infra handles retries/error mapping)
+        # --- 7) Place ENTRY limit order
         try:
             resp = await trading.create_limit_order(
                 symbol=signal.symbol,
-                side=signal.side,      # pass OrderSide; infra maps to BUY/SELL
+                side=signal.side,      # domain enum; infra maps to BUY/SELL
                 quantity=q_qty,
                 price=q_price,
                 reduce_only=False,
@@ -204,9 +312,10 @@ class OrderExecutor:
         except DomainExchangeError as exc:
             diagnostics = (
                 f"create_limit_order failed: {exc} | symbol={signal.symbol} "
-                f"raw_qty={qty} q_qty={q_qty} q_price={q_price}"
+                f"raw_qty={qty} pf_qty={q_qty_pf} q_qty={q_qty} q_price={q_price}"
             )
             log.error(diagnostics)
+            # IMPORTANT: no dangling PENDING created here; caller should persist FAILED if needed
             raise BinanceAPIException(diagnostics) from exc
         except Exception as exc:
             log.exception("create_limit_order unexpected error | sym=%s", signal.symbol)
@@ -215,9 +324,38 @@ class OrderExecutor:
         order_id = resp.get("orderId")
         log.info(
             "Order placed | sym=%s side=%s qty=%s price=%s order_id=%s",
-            signal.symbol, signal.side.value if hasattr(signal.side, "value") else str(signal.side),
+            signal.symbol, getattr(signal.side, "value", str(signal.side)),
             str(q_qty), str(q_price), str(order_id),
         )
+
+        # --- 7.1) Place TAKE_PROFIT_LIMIT as reduce-only (best-effort)
+        try:
+            tp_target = self._compute_tp_price(signal.side, signal.trigger, signal.stop)
+            # Re-quantize price only; qty stays the same
+            _, q_tp_price = await trading.quantize_limit_order(signal.symbol, q_qty, tp_target)
+
+            tp_side = OrderSide.SHORT if signal.side == OrderSide.LONG else OrderSide.LONG
+
+            tp_resp = await trading.create_take_profit_limit(
+                symbol=signal.symbol,
+                side=tp_side,
+                quantity=q_qty,
+                price=q_tp_price,
+                stop_price=q_tp_price,   # TP-LIMIT: stop == price
+                reduce_only=True,
+                time_in_force="GTC",
+            )
+            tp_order_id = tp_resp.get("orderId")
+            log.info(
+                "TP placed | sym=%s side=%s qty=%s price=%s tp_order_id=%s",
+                signal.symbol, getattr(tp_side, "value", str(tp_side)),
+                str(q_qty), str(q_tp_price), str(tp_order_id)
+            )
+        except Exception as exc:
+            # Non-fatal; entry succeeded
+            log.warning("TP create failed (entry succeeded) | sym=%s err=%s", signal.symbol, exc)
+
+        # --- 8) Return ORDER STATE (entry)
         return OrderState(
             bot_id=bot.id,
             signal_id="",  # SignalProcessor fills with Redis message id
@@ -255,14 +393,12 @@ class OrderExecutor:
             notional = bot.fixed_notional
         elif bot.use_balance_pct:
             pct = bot.balance_pct if bot.balance_pct and bot.balance_pct > 0 else Decimal("0")
-            # clamp absurd pct values defensively (e.g., >1.0)
             if pct > Decimal("1"):
                 pct = Decimal("1")
             notional = available_balance * pct
         else:
             return Decimal("0")
 
-        # apply cap only if it's a positive value (0 or None means "no cap")
         if bot.max_position_usdt and bot.max_position_usdt > 0 and notional > bot.max_position_usdt:
             notional = bot.max_position_usdt
 

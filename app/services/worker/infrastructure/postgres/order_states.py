@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import List, Optional, Sequence
 from uuid import UUID
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, select, update, and_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models.order_states import OrderStateRecord
@@ -116,16 +116,23 @@ class OrderGateway:
         statuses: Optional[Sequence[OrderStatus]] = None,
     ) -> List[OrderState]:
         """
-        Return active (pending/armed by default) orders for (bot, symbol, side).
-        Filters by postgres enum value (string) to avoid enum-type mismatches.
+        Return active orders for (bot, symbol, side).
+        IMPORTANT: ignore rows with NULL order_id to prevent dangling "pending" without an exchange id.
+        Default statuses = (PENDING, ARMED).
         """
+        active_statuses = tuple(statuses or (OrderStatus.PENDING, OrderStatus.ARMED))
         async with self._session_factory() as session:
-            active_statuses = tuple(statuses or (OrderStatus.PENDING, OrderStatus.ARMED))
-            stmt = select(OrderStateRecord).where(
-                OrderStateRecord.bot_id == bot_id,
-                OrderStateRecord.symbol == symbol,
-                OrderStateRecord.side == side.value,
-                OrderStateRecord.status.in_([s.value for s in active_statuses]),
+            stmt = (
+                select(OrderStateRecord)
+                .where(
+                    and_(
+                        OrderStateRecord.bot_id == bot_id,
+                        OrderStateRecord.symbol == symbol,
+                        OrderStateRecord.side == side.value,
+                        OrderStateRecord.status.in_([s.value for s in active_statuses]),
+                        OrderStateRecord.order_id.isnot(None),  # << key change
+                    )
+                )
             )
             res = await session.execute(stmt)
             return [_to_domain(r) for r in res.scalars().all()]
