@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Optional
 
 from ..application.order_executor import OrderExecutor
 from ..application.position_manager import PositionManager
-from ..domain.enums import OrderStatus, OrderSide, SideWhitelist
+from ..domain.enums import OrderStatus, OrderSide, SideWhitelist, exit_side_for
 from ..domain.models import ArmSignal, DisarmSignal, OrderState
-from  ...infrastructure.binance.binance_trading  import BinanceTrading
+from ...infrastructure.binance.binance_trading import BinanceTrading
+
+
+logger = logging.getLogger(__name__)
 
 
 class BotWorker:
@@ -62,17 +66,24 @@ class BotWorker:
         self._state = st
 
         # Place protective stop (best-effort, only if quantity > 0 and order placed)
+        stop_side = exit_side_for(st.side)
         try:
             if st.quantity > 0 and st.order_id:
                 await self._trading.create_stop_market_order(
                     symbol=st.symbol,
-                    side=st.side,  # OrderSide; infra maps to exchange side string internally
+                    side=stop_side,
                     quantity=st.quantity,
                     stop_price=st.stop_price,
+                    order_type="STOP_MARKET",
                 )
-        except Exception:
-            # Stop placement failures should be logged by caller; we keep state as-is.
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Failed to place stop-loss order | bot_id=%s symbol=%s side=%s err=%s",
+                self._bot.id,
+                st.symbol,
+                stop_side.value,
+                exc,
+            )
 
         return st
 
@@ -108,7 +119,36 @@ class BotWorker:
             status = await self._trading.get_order_status(symbol=st.symbol, order_id=int(st.order_id))
             if status == "FILLED":
                 st.status = OrderStatus.FILLED
-                await self._position_manager.open_position(self._bot.id, st)
+                position = await self._position_manager.open_position(self._bot.id, st)
+                tp_price = getattr(position, "take_profit", Decimal("0"))
+                tp_qty = getattr(position, "quantity", st.quantity)
+                tp_side = exit_side_for(st.side)
+                if tp_price > 0 and tp_qty > 0:
+                    try:
+                        await self._trading.create_stop_market_order(
+                            symbol=st.symbol,
+                            side=tp_side,
+                            quantity=tp_qty,
+                            stop_price=tp_price,
+                            order_type="TAKE_PROFIT_MARKET",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to place take-profit order | bot_id=%s symbol=%s side=%s tp=%s err=%s",
+                            self._bot.id,
+                            st.symbol,
+                            tp_side.value,
+                            tp_price,
+                            exc,
+                        )
+                else:
+                    logger.debug(
+                        "Skipping take-profit placement | bot_id=%s symbol=%s tp=%s qty=%s",
+                        self._bot.id,
+                        st.symbol,
+                        tp_price,
+                        tp_qty,
+                    )
                 self._state = st
         except Exception:
             # Swallow—caller will decide about retries/logging.
