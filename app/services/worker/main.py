@@ -31,6 +31,7 @@ from .infrastructure.postgres.repositories import BotRepository, CredentialRepos
 from .infrastructure.postgres.session import create_session_factory
 from .infrastructure.redis.stream_consumer import SignalStreamConsumer
 from .presentation.logging import setup_logging
+from .infrastructure.dry_run import DryRunTradingAdapter
 
 log = logging.getLogger("worker.main")
 
@@ -85,6 +86,9 @@ async def main_async() -> None:
     log.info("  Stream Block: %dms", cfg.stream_block_ms)
     log.info("  Catchup Threshold: %dms", cfg.catchup_threshold_ms)
     log.info("=" * 72)
+
+    if cfg.dry_run_mode:
+        log.warning("DRY_RUN_MODE enabled - orders will not be sent to Binance")
 
     log.info("Connecting to Redis...")
     redis = Redis.from_url(cfg.redis_url, decode_responses=False)
@@ -145,8 +149,12 @@ async def main_async() -> None:
 
     position_manager = PositionManager(binance_client=None)
 
-    async def trading_factory(bot_cfg: BotConfig) -> BinanceTrading:
+    dry_run_adapter = DryRunTradingAdapter() if cfg.dry_run_mode else None
+
+    async def trading_factory(bot_cfg: BotConfig) -> BinanceTrading | DryRunTradingAdapter:
         log.debug("Creating trading adapter | bot_id=%s symbol=%s", bot_cfg.id, bot_cfg.symbol)
+        if cfg.dry_run_mode and dry_run_adapter is not None:
+            return dry_run_adapter
         client = await get_binance_client(bot_cfg.cred_id, bot_cfg.env)
         return BinanceTrading(client)
 
