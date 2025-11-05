@@ -193,16 +193,17 @@ class OrderExecutor:
     def _compute_tp_price(self, side: OrderSide, trigger: Decimal, stop: Decimal) -> Decimal:
         """
         TP distance = tp_r_multiple × |trigger - stop|.
-        - LONG:  TP = trigger + (trigger - stop) * R
-        - SHORT: TP = trigger - (stop - trigger) * R
+        The absolute distance guards against malformed signals where the stop
+        may be on the wrong side of the trigger. In those cases we still widen
+        the take-profit away from the entry rather than inverting the RR.
+        - LONG:  TP = trigger + distance * R
+        - SHORT: TP = trigger - distance * R
         """
+        distance = abs(trigger - stop)
         r = self._tp_r
         if side == OrderSide.LONG:
-            distance = (trigger - stop) * r
-            return trigger + distance
-        else:
-            distance = (stop - trigger) * r
-            return trigger - distance
+            return trigger + (distance * r)
+        return trigger - (distance * r)
 
     async def _min_notional_for(self, trading: TradingPort, symbol: str) -> Decimal:
         f = await trading.get_symbol_filters(symbol)

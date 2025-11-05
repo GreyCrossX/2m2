@@ -151,3 +151,38 @@ async def test_execute_order_rolls_back_when_tp_fails() -> None:
     # entry and stop must be cancelled on rollback
     cancelled_ids = {item["order_id"] for item in trading.cancelled}
     assert cancelled_ids == {111, 222}
+
+
+@pytest.mark.asyncio
+async def test_execute_order_rolls_back_when_stop_fails() -> None:
+    bot = _make_bot()
+    signal = _make_signal(OrderSide.LONG)
+    balance = BalanceValidatorStub(Decimal("1000"))
+    trading = TradingStub(fail_stop=True)
+
+    executor = OrderExecutor(balance_validator=balance, binance_client=trading)
+
+    state = await executor.execute_order(bot, signal)
+
+    assert state.status == OrderStatus.FAILED
+    assert state.order_id is None
+    assert state.stop_order_id is None
+    assert state.take_profit_order_id is None
+
+    # entry must be cancelled when stop placement fails
+    cancelled_ids = [item["order_id"] for item in trading.cancelled]
+    assert cancelled_ids == [111]
+    # stop order should not remain recorded on failure
+    assert trading.tp_orders == []
+
+
+def test_compute_tp_price_handles_inverted_stops() -> None:
+    balance = BalanceValidatorStub(Decimal("1000"))
+    executor = OrderExecutor(balance_validator=balance, binance_client=TradingStub())
+
+    long_tp = executor._compute_tp_price(OrderSide.LONG, Decimal("100"), Decimal("105"))
+    short_tp = executor._compute_tp_price(OrderSide.SHORT, Decimal("100"), Decimal("95"))
+
+    rr = executor._tp_r
+    assert long_tp == Decimal("100") + (Decimal("5") * rr)
+    assert short_tp == Decimal("100") - (Decimal("5") * rr)
