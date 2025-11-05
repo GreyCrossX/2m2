@@ -299,6 +299,7 @@ class BinanceTrading:
         working_type: str | None = None,   # CONTRACT_PRICE / MARK_PRICE
         position_side: str = "BOTH",
         order_type: str = "STOP_MARKET",
+        reduce_only: bool = True,
     ) -> Dict[str, Any]:
         """
         Create a STOP_MARKET or TAKE_PROFIT_MARKET order (reduceOnly implicit via position mode).
@@ -331,6 +332,7 @@ class BinanceTrading:
             "stopPrice": q_stop,
             "positionSide": position_side,
         }
+        payload["reduceOnly"] = bool(reduce_only)
         if working_type:
             payload["workingType"] = working_type
 

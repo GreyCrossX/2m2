@@ -32,6 +32,7 @@ class OrderGateway(Protocol):
         bot_id: UUID,
         symbol: str,
         side: OrderSide,  # <<< changed
+        statuses: Optional[Iterable[OrderStatus]] = None,
     ) -> List[OrderState]: ...
 
     async def save_state(self, state: OrderState) -> None: ...
@@ -139,6 +140,23 @@ class SignalProcessor:
                 await self._orders.save_state(state)
                 results.append(state)
                 continue
+
+            allow_pyramiding = getattr(bot, "allow_pyramiding", False)
+            if not allow_pyramiding:
+                active_states = await self._orders.list_pending_order_states(
+                    bot.id,
+                    sig.symbol,
+                    sig.side,
+                    statuses=(OrderStatus.PENDING, OrderStatus.ARMED, OrderStatus.FILLED),
+                )
+                if active_states:
+                    logger.info(
+                        "Active trade detected, skipping new ARM | bot_id=%s active=%s | %s",
+                        bot_id,
+                        len(active_states),
+                        format_log_context(context),
+                    )
+                    continue
 
             logger.info(
                 "Executing order | bot_id=%s side=%s trigger=%s | %s",
@@ -257,34 +275,55 @@ class SignalProcessor:
                     logger.debug("Order not active | status=%s - skipping", state.status.value)
                     continue
 
-                if not state.order_id:
-                    logger.warning("Pending order has no order_id | bot_id=%s state_id=%s", bot_id, state.id)
+                if not (state.order_id or state.stop_order_id or state.take_profit_order_id):
+                    logger.warning("Pending order has no exchange ids | bot_id=%s state_id=%s", bot_id, state.id)
                     continue
 
-                total_matching += 1
-                logger.info(
-                    "Attempting to cancel order | bot_id=%s order_id=%s symbol=%s | %s",
-                    bot_id, state.order_id, state.symbol, format_log_context(context),
-                )
+                trading = await self._trading_factory(bot)
+                cancel_targets = [
+                    ("entry", state.order_id),
+                    ("stop", state.stop_order_id),
+                    ("take_profit", state.take_profit_order_id),
+                ]
 
-                try:
-                    trading = await self._trading_factory(bot)
-                    await trading.cancel_order(symbol=state.symbol, order_id=int(state.order_id))
+                cancelled_any = False
+                for label, oid in cancel_targets:
+                    if not oid:
+                        continue
+                    total_matching += 1
                     logger.info(
-                        "Order cancelled successfully | bot_id=%s order_id=%s | %s",
-                        bot_id, state.order_id, format_log_context(context),
+                        "Attempting to cancel %s order | bot_id=%s order_id=%s symbol=%s | %s",
+                        label,
+                        bot_id,
+                        oid,
+                        state.symbol,
+                        format_log_context(context),
                     )
-                except Exception as exc:
-                    logger.warning(
-                        "Cancel order failed | bot_id=%s order_id=%s disarm_reason=%s err=%s",
-                        bot.id, state.order_id, sig.reason, exc,
-                    )
-                    continue
+                    try:
+                        await trading.cancel_order(symbol=state.symbol, order_id=int(oid))
+                        cancelled.append(str(oid))
+                        cancelled_any = True
+                        logger.info(
+                            "%s order cancelled | bot_id=%s order_id=%s | %s",
+                            label.capitalize(),
+                            bot_id,
+                            oid,
+                            format_log_context(context),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Cancel %s failed | bot_id=%s order_id=%s disarm_reason=%s err=%s",
+                            label,
+                            bot.id,
+                            oid,
+                            sig.reason,
+                            exc,
+                        )
 
-                logger.debug("Marking order as CANCELLED | bot_id=%s order_id=%s", bot_id, state.order_id)
-                state.mark(OrderStatus.CANCELLED)
-                await self._orders.save_state(state)
-                cancelled.append(str(state.order_id))
+                if cancelled_any:
+                    logger.debug("Marking order as CANCELLED | bot_id=%s state_id=%s", bot_id, state.id)
+                    state.mark(OrderStatus.CANCELLED)
+                    await self._orders.save_state(state)
 
         logger.info(
             "DISARM complete | found=%d cancelled=%d msg_id=%s | %s",
