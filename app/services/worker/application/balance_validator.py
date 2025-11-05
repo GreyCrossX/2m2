@@ -47,8 +47,20 @@ class BalanceValidator:
         self,
         bot: BotConfig,
         required_margin: Decimal,
+        *,
+        available_balance: Decimal | None = None,
     ) -> Tuple[bool, Decimal]:
-        available = await self.get_available_balance(bot.cred_id, bot.env)
+        """Validate that available balance covers ``required_margin``.
+
+        ``available_balance`` allows callers to reuse a recently fetched value
+        to avoid duplicate cache/network lookups (the validator will still
+        consult its cache if ``None`` is provided).
+        """
+        available = (
+            available_balance
+            if available_balance is not None
+            else await self.get_available_balance(bot.cred_id, bot.env)
+        )
         ok = available >= required_margin
         return ok, available
 

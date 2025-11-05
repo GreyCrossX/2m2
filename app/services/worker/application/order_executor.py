@@ -5,16 +5,29 @@ from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_CEILING
 from typing import Awaitable, Callable, Optional, Protocol
 from uuid import UUID
 
+from app.services.order_placement import OrderPlacementService, TrioOrderResult
 from ..domain.models import ArmSignal, BotConfig, OrderState
-from ..domain.enums import OrderStatus, OrderSide, exit_side_for
-from ..domain.exceptions import BinanceAPIException, DomainExchangeError
+from ..domain.enums import OrderStatus, OrderSide
+from ..domain.exceptions import (
+    BinanceAPIException,
+    BinanceBadRequestException,
+    BinanceExchangeDownException,
+    BinanceRateLimitException,
+)
 
 log = logging.getLogger(__name__)
 
 # --------- Ports (to be implemented by Infra) ---------
 
 class BalanceValidatorPort(Protocol):
-    async def validate_balance(self, bot: BotConfig, required_margin: Decimal) -> tuple[bool, Decimal]: ...
+    async def validate_balance(
+        self,
+        bot: BotConfig,
+        required_margin: Decimal,
+        *,
+        available_balance: Decimal | None = None,
+    ) -> tuple[bool, Decimal]: ...
+
     async def get_available_balance(self, cred_id: UUID, env: str) -> Decimal: ...
 
 
@@ -113,6 +126,62 @@ class OrderExecutor:
         self._tp_r = tp_r_multiple
         self.trading_factory = trading_factory  # may be set/overridden from main.py
 
+    def _log_context(self, bot: BotConfig, signal: ArmSignal) -> dict[str, str]:
+        return {
+            "bot_id": str(bot.id),
+            "symbol": signal.symbol,
+            "signal_id": signal.signal_msg_id or "",
+        }
+
+    def _context_str(self, context: dict[str, str]) -> str:
+        return " ".join(f"{k}={v}" for k, v in context.items() if v)
+
+    def _failure_state(
+        self,
+        bot: BotConfig,
+        signal: ArmSignal,
+        *,
+        status: OrderStatus = OrderStatus.FAILED,
+        quantity: Decimal | None = None,
+        trigger_price: Decimal | None = None,
+    ) -> OrderState:
+        qty = quantity if quantity and quantity > 0 else Decimal("0")
+        trig = trigger_price if trigger_price and trigger_price > 0 else signal.trigger
+        return OrderState(
+            bot_id=bot.id,
+            signal_id="",
+            status=status,
+            side=signal.side,
+            symbol=signal.symbol,
+            trigger_price=trig,
+            stop_price=signal.stop,
+            quantity=qty,
+        )
+
+    async def _place_order_trio(
+        self,
+        trading: TradingPort,
+        bot: BotConfig,
+        signal: ArmSignal,
+        *,
+        quantity: Decimal,
+        entry_price: Decimal,
+        stop_price: Decimal,
+        take_profit_price: Decimal,
+    ) -> TrioOrderResult:
+        context = self._log_context(bot, signal)
+        placement = OrderPlacementService(trading, logger=log)
+        return await placement.place_trio_orders(
+            symbol=signal.symbol,
+            side=signal.side,
+            quantity=quantity,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            take_profit_price=take_profit_price,
+            reduce_only=False,
+            context=context,
+        )
+
     async def _get_trading(self, bot: BotConfig) -> TradingPort:
         if self._bx is not None:
             return self._bx
@@ -183,41 +252,32 @@ class OrderExecutor:
         bot: BotConfig,
         signal: ArmSignal,
     ) -> OrderState:
+        context = self._log_context(bot, signal)
+        ctx_str = self._context_str(context)
+
         # --- 0) Validate inputs defensively
         if signal.trigger <= 0:
-            log.error("Invalid trigger price <= 0 | symbol=%s trigger=%s", signal.symbol, signal.trigger)
-            return OrderState(
-                bot_id=bot.id,
-                signal_id="",
-                status=OrderStatus.FAILED,
-                side=signal.side,
-                symbol=signal.symbol,
-                trigger_price=signal.trigger,
-                stop_price=signal.stop,
-                quantity=Decimal("0"),
-            )
+            log.error("Invalid trigger price <= 0 | %s", ctx_str)
+            return self._failure_state(bot, signal)
 
         # --- 1) Fetch available balance (authoritative, cached by BalanceValidator)
         available = await self._bal.get_available_balance(bot.cred_id, bot.env)
+        log.info("[balance.fetch] available=%s | %s", str(available), ctx_str)
 
         # --- 2) Compute intended size
         qty = self._calculate_position_size(bot, available, signal.trigger)
         if qty <= 0:
             log.info(
-                "[sizing] zero/negative qty -> skip | bot=%s sym=%s available=%s trigger=%s cfg: (use_pct=%s pct=%s fixed=%s max_usdt=%s)",
-                str(bot.id), signal.symbol, str(available), str(signal.trigger),
-                bot.use_balance_pct, str(bot.balance_pct), str(bot.fixed_notional), str(bot.max_position_usdt),
+                "[sizing] zero/negative qty -> skip | available=%s trigger=%s cfg: (use_pct=%s pct=%s fixed=%s max_usdt=%s) | %s",
+                str(available),
+                str(signal.trigger),
+                bot.use_balance_pct,
+                str(bot.balance_pct),
+                str(bot.fixed_notional),
+                str(bot.max_position_usdt),
+                ctx_str,
             )
-            return OrderState(
-                bot_id=bot.id,
-                signal_id="",
-                status=OrderStatus.FAILED,
-                side=signal.side,
-                symbol=signal.symbol,
-                trigger_price=signal.trigger,
-                stop_price=signal.stop,
-                quantity=Decimal("0"),
-            )
+            return self._failure_state(bot, signal)
 
         # Required margin = exposure / leverage
         leverage = bot.leverage if bot.leverage and bot.leverage > 0 else 1
@@ -225,222 +285,153 @@ class OrderExecutor:
             exposure = qty * signal.trigger
             required_margin = exposure / Decimal(leverage)
         except (InvalidOperation, ZeroDivisionError):
-            log.exception("Required margin calculation failed | qty=%s trigger=%s leverage=%s", qty, signal.trigger, leverage)
-            return OrderState(
-                bot_id=bot.id,
-                signal_id="",
-                status=OrderStatus.FAILED,
-                side=signal.side,
-                symbol=signal.symbol,
-                trigger_price=signal.trigger,
-                stop_price=signal.stop,
-                quantity=Decimal("0"),
+            log.exception(
+                "Required margin calculation failed | qty=%s trigger=%s leverage=%s | %s",
+                qty,
+                signal.trigger,
+                leverage,
+                ctx_str,
             )
+            return self._failure_state(bot, signal)
 
         log.info(
-            "[sizing] qty=%s price=%s exposure=%s lev=%s required_margin=%s",
-            str(qty), str(signal.trigger), str(exposure), leverage, str(required_margin),
+            "[sizing] qty=%s price=%s exposure=%s lev=%s required_margin=%s | %s",
+            str(qty),
+            str(signal.trigger),
+            str(exposure),
+            leverage,
+            str(required_margin),
+            ctx_str,
         )
 
         # --- 3) Validate balance
-        is_ok, avail_check = await self._bal.validate_balance(bot, required_margin)
-        log.info("[balance] available=%s required=%s pass=%s", str(avail_check), str(required_margin), is_ok)
+        is_ok, avail_check = await self._bal.validate_balance(
+            bot,
+            required_margin,
+            available_balance=available,
+        )
+        log.info(
+            "[balance] available=%s required=%s pass=%s | %s",
+            str(avail_check),
+            str(required_margin),
+            is_ok,
+            ctx_str,
+        )
         if not is_ok:
-            return OrderState(
-                bot_id=bot.id,
-                signal_id="",
-                status=OrderStatus.SKIPPED_LOW_BALANCE,
-                side=signal.side,
-                symbol=signal.symbol,
-                trigger_price=signal.trigger,
-                stop_price=signal.stop,
-                quantity=Decimal("0"),
-            )
+            return self._failure_state(bot, signal, status=OrderStatus.SKIPPED_LOW_BALANCE)
 
         # --- 4) Get trading port, set leverage idempotently
         trading = await self._get_trading(bot)
         try:
             await trading.set_leverage(signal.symbol, bot.leverage)
         except Exception:
-            log.exception("set_leverage failed | sym=%s lev=%s", signal.symbol, bot.leverage)
-            return OrderState(
-                bot_id=bot.id,
-                signal_id="",
-                status=OrderStatus.FAILED,
-                side=signal.side,
-                symbol=signal.symbol,
-                trigger_price=signal.trigger,
-                stop_price=signal.stop,
-                quantity=Decimal("0"),
+            log.exception(
+                "set_leverage failed | sym=%s lev=%s | %s",
+                signal.symbol,
+                bot.leverage,
+                ctx_str,
             )
+            return self._failure_state(bot, signal)
 
         # --- 5) Pre-flight: enforce 3dp & min-notional bump, re-check margin
-        balance_free = await self._bal.get_available_balance(bot.cred_id, bot.env)
         lev_d = Decimal(str(leverage))
         ok_pf, q_qty_pf, reason_pf = await self._preflight_qty(
-            trading, signal.symbol, qty, signal.trigger, lev_d, balance_free
+            trading,
+            signal.symbol,
+            qty,
+            signal.trigger,
+            lev_d,
+            available,
         )
         if not ok_pf:
-            log.info("Preflight failed | sym=%s reason=%s", signal.symbol, reason_pf)
-            status = OrderStatus.SKIPPED_LOW_BALANCE if "insufficient_margin" in (reason_pf or "") else OrderStatus.FAILED
-            return OrderState(
-                bot_id=bot.id,
-                signal_id="",
-                status=status,
-                side=signal.side,
-                symbol=signal.symbol,
-                trigger_price=signal.trigger,
-                stop_price=signal.stop,
-                quantity=Decimal("0"),
+            log.info(
+                "Preflight failed | sym=%s reason=%s | %s",
+                signal.symbol,
+                reason_pf,
+                ctx_str,
             )
+            status = OrderStatus.SKIPPED_LOW_BALANCE if "insufficient_margin" in (reason_pf or "") else OrderStatus.FAILED
+            return self._failure_state(bot, signal, status=status)
 
         # --- 6) Quantize ENTRY (exchange ticks), price may adjust; qty should still meet notional
         q_qty, q_price = await trading.quantize_limit_order(signal.symbol, q_qty_pf, signal.trigger)
         if q_qty <= 0 or q_price is None or q_price <= 0:
             log.error(
-                "Quantization invalid | sym=%s raw_qty=%s pf_qty=%s raw_price=%s -> q_qty=%s q_price=%s",
-                signal.symbol, str(qty), str(q_qty_pf), str(signal.trigger), str(q_qty), str(q_price),
+                "Quantization invalid | sym=%s raw_qty=%s pf_qty=%s raw_price=%s -> q_qty=%s q_price=%s | %s",
+                signal.symbol,
+                str(qty),
+                str(q_qty_pf),
+                str(signal.trigger),
+                str(q_qty),
+                str(q_price),
+                ctx_str,
             )
-            return OrderState(
-                bot_id=bot.id,
-                signal_id="",
-                status=OrderStatus.FAILED,
-                side=signal.side,
-                symbol=signal.symbol,
-                trigger_price=q_price or Decimal("0"),
-                stop_price=signal.stop,
-                quantity=Decimal("0"),
-            )
+            return self._failure_state(bot, signal)
 
-        # --- 7) Place ENTRY limit order
+        # Additional guard: ensure quantized order still within balance
         try:
-            resp = await trading.create_limit_order(
-                symbol=signal.symbol,
-                side=signal.side,      # domain enum; infra maps to BUY/SELL
-                quantity=q_qty,
-                price=q_price,
-                reduce_only=False,
-                time_in_force="GTC",
+            required_quantized_margin = (q_qty * q_price) / Decimal(leverage)
+        except InvalidOperation:
+            required_quantized_margin = required_margin
+        if required_quantized_margin > avail_check:
+            log.info(
+                "Quantized margin exceeds available | required=%s available=%s | %s",
+                str(required_quantized_margin),
+                str(avail_check),
+                ctx_str,
             )
-        except DomainExchangeError as exc:
-            diagnostics = (
-                f"create_limit_order failed: {exc} | symbol={signal.symbol} "
-                f"raw_qty={qty} pf_qty={q_qty_pf} q_qty={q_qty} q_price={q_price}"
-            )
-            log.error(diagnostics)
-            # IMPORTANT: no dangling PENDING created here; caller should persist FAILED if needed
-            raise BinanceAPIException(diagnostics) from exc
-        except Exception as exc:
-            log.exception("create_limit_order unexpected error | sym=%s", signal.symbol)
-            raise BinanceAPIException(f"create_limit_order failed: {exc}") from exc
+            return self._failure_state(bot, signal, status=OrderStatus.SKIPPED_LOW_BALANCE)
 
-        order_id = resp.get("orderId")
+        # --- 7) Quantize TP price separately
+        tp_target = self._compute_tp_price(signal.side, signal.trigger, signal.stop)
+        _, q_tp_price = await trading.quantize_limit_order(signal.symbol, q_qty, tp_target)
+        if q_tp_price is None or q_tp_price <= 0:
+            log.error("Quantized TP price invalid | sym=%s | %s", signal.symbol, ctx_str)
+            return self._failure_state(bot, signal)
+
+        # --- 8) Place orders atomically
+        try:
+            trio = await self._place_order_trio(
+                trading,
+                bot,
+                signal,
+                quantity=q_qty,
+                entry_price=q_price,
+                stop_price=signal.stop,
+                take_profit_price=q_tp_price,
+            )
+        except (BinanceBadRequestException, BinanceRateLimitException, BinanceExchangeDownException) as exc:
+            log.warning("Order placement failed | %s reason=%s", ctx_str, exc)
+            return self._failure_state(bot, signal)
+        except BinanceAPIException as exc:
+            log.error("Order placement failed | %s reason=%s", ctx_str, exc)
+            return self._failure_state(bot, signal)
+
         log.info(
-            "Order placed | sym=%s side=%s qty=%s price=%s order_id=%s",
-            signal.symbol, getattr(signal.side, "value", str(signal.side)),
-            str(q_qty), str(q_price), str(order_id),
+            "Order trio placed | qty=%s entry_price=%s stop=%s tp=%s entry_id=%s stop_id=%s tp_id=%s | %s",
+            str(q_qty),
+            str(q_price),
+            str(signal.stop),
+            str(q_tp_price),
+            trio.entry_order_id,
+            trio.stop_order_id,
+            trio.take_profit_order_id,
+            ctx_str,
         )
 
-        stop_order_id: Optional[int] = None
-        take_profit_order_id: Optional[int] = None
-
-        # --- 7.1) Place STOP MARKET reduce-only immediately
-        stop_side = exit_side_for(signal.side)
-        try:
-            stop_resp = await trading.create_stop_market_order(
-                symbol=signal.symbol,
-                side=stop_side,
-                quantity=q_qty,
-                stop_price=signal.stop,
-                reduce_only=True,
-                order_type="STOP_MARKET",
-            )
-            stop_order_id = stop_resp.get("orderId")
-            log.info(
-                "Stop-loss placed | sym=%s side=%s qty=%s stop=%s stop_order_id=%s",
-                signal.symbol,
-                getattr(stop_side, "value", str(stop_side)),
-                str(q_qty),
-                str(signal.stop),
-                str(stop_order_id),
-            )
-        except Exception as exc:
-            log.error("Stop-loss placement failed, cancelling entry | sym=%s err=%s", signal.symbol, exc)
-            if order_id:
-                try:
-                    await trading.cancel_order(symbol=signal.symbol, order_id=int(order_id))
-                except Exception:
-                    log.exception(
-                        "Failed to cancel entry after stop-loss error | sym=%s order_id=%s",
-                        signal.symbol,
-                        order_id,
-                    )
-            raise BinanceAPIException(f"create_stop_market_order failed: {exc}") from exc
-
-        # --- 7.2) Place TAKE_PROFIT_LIMIT as reduce-only (required)
-        try:
-            tp_target = self._compute_tp_price(signal.side, signal.trigger, signal.stop)
-            # Re-quantize price only; qty stays the same
-            _, q_tp_price = await trading.quantize_limit_order(signal.symbol, q_qty, tp_target)
-            if q_tp_price is None or q_tp_price <= 0:
-                raise BinanceAPIException("Quantized TP price invalid")
-
-            tp_side = exit_side_for(signal.side)
-
-            tp_resp = await trading.create_take_profit_limit(
-                symbol=signal.symbol,
-                side=tp_side,
-                quantity=q_qty,
-                price=q_tp_price,
-                stop_price=q_tp_price,   # TP-LIMIT: stop == price
-                reduce_only=True,
-                time_in_force="GTC",
-            )
-            take_profit_order_id = tp_resp.get("orderId")
-            log.info(
-                "TP placed | sym=%s side=%s qty=%s price=%s tp_order_id=%s",
-                signal.symbol,
-                getattr(tp_side, "value", str(tp_side)),
-                str(q_qty),
-                str(q_tp_price),
-                str(take_profit_order_id),
-            )
-        except Exception as exc:
-            log.error("Take-profit placement failed, rolling back entry | sym=%s err=%s", signal.symbol, exc)
-            # Attempt to cancel protective stop first, then entry
-            if stop_order_id:
-                try:
-                    await trading.cancel_order(symbol=signal.symbol, order_id=int(stop_order_id))
-                except Exception:
-                    log.exception(
-                        "Failed to cancel stop-loss during rollback | sym=%s stop_order_id=%s",
-                        signal.symbol,
-                        stop_order_id,
-                    )
-            if order_id:
-                try:
-                    await trading.cancel_order(symbol=signal.symbol, order_id=int(order_id))
-                except Exception:
-                    log.exception(
-                        "Failed to cancel entry during rollback | sym=%s order_id=%s",
-                        signal.symbol,
-                        order_id,
-                    )
-            raise BinanceAPIException(f"create_take_profit_limit failed: {exc}") from exc
-
-        # --- 8) Return ORDER STATE (entry)
+        # TODO: Position creation will be triggered once fill events are wired from websocket/user-data streams.
         return OrderState(
             bot_id=bot.id,
-            signal_id="",  # SignalProcessor fills with Redis message id
+            signal_id="",
             status=OrderStatus.PENDING,
             side=signal.side,
             symbol=signal.symbol,
             trigger_price=q_price,
             stop_price=signal.stop,
             quantity=q_qty,
-            order_id=order_id,
-            stop_order_id=stop_order_id,
-            take_profit_order_id=take_profit_order_id,
+            order_id=trio.entry_order_id,
+            stop_order_id=trio.stop_order_id,
+            take_profit_order_id=trio.take_profit_order_id,
         )
 
     # ----- sizing -----

@@ -301,8 +301,18 @@ class ScriptBalanceValidator:
     binance_account: ScriptBinanceAccount
     balance_cache: ScriptBalanceCache
 
-    async def validate_balance(self, bot: BotConfig, required_margin: Decimal) -> Tuple[bool, Decimal]:
-        available = await self.get_available_balance(bot.cred_id, bot.env)
+    async def validate_balance(
+        self,
+        bot: BotConfig,
+        required_margin: Decimal,
+        *,
+        available_balance: Decimal | None = None,
+    ) -> Tuple[bool, Decimal]:
+        available = (
+            available_balance
+            if available_balance is not None
+            else await self.get_available_balance(bot.cred_id, bot.env)
+        )
         return (available >= required_margin), available
 
     async def get_available_balance(self, cred_id, env) -> Decimal:
@@ -396,7 +406,7 @@ async def main() -> None:
     pre_qty = _calc_qty(bot, available, trigger)
     exposure = pre_qty * trigger
     required_margin = exposure / Decimal(bot.leverage if bot.leverage > 0 else 1)
-    ok, _ = await validator.validate_balance(bot, required_margin)
+    ok, _ = await validator.validate_balance(bot, required_margin, available_balance=available)
 
     print(f"Pre-quant qty       : {pre_qty}")
     print(f"Exposure (qty*px)   : {exposure}")

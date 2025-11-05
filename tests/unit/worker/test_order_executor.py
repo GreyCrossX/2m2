@@ -4,8 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.services.worker.application.order_executor import OrderExecutor
-from app.services.worker.domain.enums import OrderSide, SideWhitelist
-from app.services.worker.domain.exceptions import BinanceAPIException
+from app.services.worker.domain.enums import OrderSide, OrderStatus, SideWhitelist
 from app.services.worker.domain.models import ArmSignal, BotConfig
 
 
@@ -13,8 +12,15 @@ class BalanceValidatorStub:
     def __init__(self, balance: Decimal) -> None:
         self._balance = balance
 
-    async def validate_balance(self, bot: BotConfig, required_margin: Decimal) -> tuple[bool, Decimal]:
-        return True, self._balance
+    async def validate_balance(
+        self,
+        bot: BotConfig,
+        required_margin: Decimal,
+        *,
+        available_balance: Decimal | None = None,
+    ) -> tuple[bool, Decimal]:
+        balance = self._balance if available_balance is None else available_balance
+        return True, balance
 
     async def get_available_balance(self, cred_id, env) -> Decimal:
         return self._balance
@@ -121,6 +127,7 @@ async def test_execute_order_places_stop_and_tp() -> None:
     assert state.order_id == 111
     assert state.stop_order_id == 222
     assert state.take_profit_order_id == 333
+    assert state.status == OrderStatus.PENDING
 
 
 @pytest.mark.asyncio
@@ -132,8 +139,12 @@ async def test_execute_order_rolls_back_when_tp_fails() -> None:
 
     executor = OrderExecutor(balance_validator=balance, binance_client=trading)
 
-    with pytest.raises(BinanceAPIException):
-        await executor.execute_order(bot, signal)
+    state = await executor.execute_order(bot, signal)
+
+    assert state.status == OrderStatus.FAILED
+    assert state.order_id is None
+    assert state.stop_order_id is None
+    assert state.take_profit_order_id is None
 
     # stop should be placed before failure
     assert trading.stop_orders
