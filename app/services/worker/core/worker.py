@@ -5,8 +5,7 @@ from decimal import Decimal
 from typing import Optional
 
 from ..application.order_executor import OrderExecutor
-from ..application.position_manager import PositionManager
-from ..domain.enums import OrderStatus, OrderSide, SideWhitelist, exit_side_for
+from ..domain.enums import OrderStatus, SideWhitelist
 from ..domain.models import ArmSignal, DisarmSignal, OrderState
 from ...infrastructure.binance.binance_trading import BinanceTrading
 
@@ -34,12 +33,11 @@ class BotWorker:
         self,
         bot,  # BotConfig
         order_executor: OrderExecutor,
-        position_manager: PositionManager,
+        position_manager,  # Deprecated dependency retained for compatibility
         binance_trading: BinanceTrading,
     ):
         self._bot = bot
         self._order_executor = order_executor
-        self._position_manager = position_manager
         self._trading = binance_trading
         self._state: Optional[OrderState] = None
 
@@ -65,26 +63,6 @@ class BotWorker:
         # attach message id if needed by caller afterwards
         self._state = st
 
-        # Place protective stop (best-effort, only if quantity > 0 and order placed)
-        stop_side = exit_side_for(st.side)
-        try:
-            if st.quantity > 0 and st.order_id:
-                await self._trading.create_stop_market_order(
-                    symbol=st.symbol,
-                    side=stop_side,
-                    quantity=st.quantity,
-                    stop_price=st.stop_price,
-                    order_type="STOP_MARKET",
-                )
-        except Exception as exc:
-            logger.warning(
-                "Failed to place stop-loss order | bot_id=%s symbol=%s side=%s err=%s",
-                self._bot.id,
-                st.symbol,
-                stop_side.value,
-                exc,
-            )
-
         return st
 
     async def handle_disarm_signal(self, signal: DisarmSignal, message_id: str) -> None:
@@ -103,53 +81,3 @@ class BotWorker:
 
         # Keep state (caller may persist), then it can be cleared upstream if desired
         self._state = st
-
-    def get_state(self) -> Optional[OrderState]:
-        return self._state
-
-    async def _check_order_fill(self) -> None:
-        """
-        Optional polling-based fill detection (if you don’t consume order updates).
-        Caller is responsible for scheduling this periodically.
-        """
-        st = self._state
-        if not st or not st.order_id or st.status != OrderStatus.PENDING:
-            return
-        try:
-            status = await self._trading.get_order_status(symbol=st.symbol, order_id=int(st.order_id))
-            if status == "FILLED":
-                st.status = OrderStatus.FILLED
-                position = await self._position_manager.open_position(self._bot.id, st)
-                tp_price = getattr(position, "take_profit", Decimal("0"))
-                tp_qty = getattr(position, "quantity", st.quantity)
-                tp_side = exit_side_for(st.side)
-                if tp_price > 0 and tp_qty > 0:
-                    try:
-                        await self._trading.create_stop_market_order(
-                            symbol=st.symbol,
-                            side=tp_side,
-                            quantity=tp_qty,
-                            stop_price=tp_price,
-                            order_type="TAKE_PROFIT_MARKET",
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to place take-profit order | bot_id=%s symbol=%s side=%s tp=%s err=%s",
-                            self._bot.id,
-                            st.symbol,
-                            tp_side.value,
-                            tp_price,
-                            exc,
-                        )
-                else:
-                    logger.debug(
-                        "Skipping take-profit placement | bot_id=%s symbol=%s tp=%s qty=%s",
-                        self._bot.id,
-                        st.symbol,
-                        tp_price,
-                        tp_qty,
-                    )
-                self._state = st
-        except Exception:
-            # Swallow—caller will decide about retries/logging.
-            pass

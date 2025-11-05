@@ -47,6 +47,8 @@ class OrderStateRecord(Base):
     # Redis stream message id (not a UUID)
     signal_id = Column(String(64), nullable=False)
     order_id = Column(BigInteger, nullable=True)
+    stop_order_id = Column(BigInteger, nullable=True)
+    take_profit_order_id = Column(BigInteger, nullable=True)
 
     status = Column(
         SAEnum(*_ORDER_STATUS_VALUES, name="order_status_enum", create_type=False),

@@ -264,6 +264,8 @@ class OrderState:
 
     id: UUID = field(default_factory=uuid4)
     order_id: Optional[int] = None   # Binance-assigned orderId (int per UMFutures)
+    stop_order_id: Optional[int] = None
+    take_profit_order_id: Optional[int] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

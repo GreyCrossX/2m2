@@ -6,7 +6,7 @@ from typing import Awaitable, Callable, Optional, Protocol
 from uuid import UUID
 
 from ..domain.models import ArmSignal, BotConfig, OrderState
-from ..domain.enums import OrderStatus, OrderSide
+from ..domain.enums import OrderStatus, OrderSide, exit_side_for
 from ..domain.exceptions import BinanceAPIException, DomainExchangeError
 
 log = logging.getLogger(__name__)
@@ -40,6 +40,17 @@ class TradingPort(Protocol):
         new_client_order_id: Optional[str] = None,
     ) -> dict: ...
 
+    async def create_stop_market_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        quantity: Decimal,
+        stop_price: Decimal,
+        *,
+        reduce_only: bool = True,
+        order_type: str = "STOP_MARKET",
+    ) -> dict: ...
+
     # explicit TP-LIMIT order
     async def create_take_profit_limit(
         self,
@@ -55,6 +66,8 @@ class TradingPort(Protocol):
 
     # NEW: filters for minNotional/LOT_SIZE cache
     async def get_symbol_filters(self, symbol: str) -> dict: ...
+
+    async def cancel_order(self, symbol: str, order_id: int) -> None: ...
 
 
 class PositionManagerPort(Protocol):
@@ -328,13 +341,51 @@ class OrderExecutor:
             str(q_qty), str(q_price), str(order_id),
         )
 
-        # --- 7.1) Place TAKE_PROFIT_LIMIT as reduce-only (best-effort)
+        stop_order_id: Optional[int] = None
+        take_profit_order_id: Optional[int] = None
+
+        # --- 7.1) Place STOP MARKET reduce-only immediately
+        stop_side = exit_side_for(signal.side)
+        try:
+            stop_resp = await trading.create_stop_market_order(
+                symbol=signal.symbol,
+                side=stop_side,
+                quantity=q_qty,
+                stop_price=signal.stop,
+                reduce_only=True,
+                order_type="STOP_MARKET",
+            )
+            stop_order_id = stop_resp.get("orderId")
+            log.info(
+                "Stop-loss placed | sym=%s side=%s qty=%s stop=%s stop_order_id=%s",
+                signal.symbol,
+                getattr(stop_side, "value", str(stop_side)),
+                str(q_qty),
+                str(signal.stop),
+                str(stop_order_id),
+            )
+        except Exception as exc:
+            log.error("Stop-loss placement failed, cancelling entry | sym=%s err=%s", signal.symbol, exc)
+            if order_id:
+                try:
+                    await trading.cancel_order(symbol=signal.symbol, order_id=int(order_id))
+                except Exception:
+                    log.exception(
+                        "Failed to cancel entry after stop-loss error | sym=%s order_id=%s",
+                        signal.symbol,
+                        order_id,
+                    )
+            raise BinanceAPIException(f"create_stop_market_order failed: {exc}") from exc
+
+        # --- 7.2) Place TAKE_PROFIT_LIMIT as reduce-only (required)
         try:
             tp_target = self._compute_tp_price(signal.side, signal.trigger, signal.stop)
             # Re-quantize price only; qty stays the same
             _, q_tp_price = await trading.quantize_limit_order(signal.symbol, q_qty, tp_target)
+            if q_tp_price is None or q_tp_price <= 0:
+                raise BinanceAPIException("Quantized TP price invalid")
 
-            tp_side = OrderSide.SHORT if signal.side == OrderSide.LONG else OrderSide.LONG
+            tp_side = exit_side_for(signal.side)
 
             tp_resp = await trading.create_take_profit_limit(
                 symbol=signal.symbol,
@@ -345,15 +396,37 @@ class OrderExecutor:
                 reduce_only=True,
                 time_in_force="GTC",
             )
-            tp_order_id = tp_resp.get("orderId")
+            take_profit_order_id = tp_resp.get("orderId")
             log.info(
                 "TP placed | sym=%s side=%s qty=%s price=%s tp_order_id=%s",
-                signal.symbol, getattr(tp_side, "value", str(tp_side)),
-                str(q_qty), str(q_tp_price), str(tp_order_id)
+                signal.symbol,
+                getattr(tp_side, "value", str(tp_side)),
+                str(q_qty),
+                str(q_tp_price),
+                str(take_profit_order_id),
             )
         except Exception as exc:
-            # Non-fatal; entry succeeded
-            log.warning("TP create failed (entry succeeded) | sym=%s err=%s", signal.symbol, exc)
+            log.error("Take-profit placement failed, rolling back entry | sym=%s err=%s", signal.symbol, exc)
+            # Attempt to cancel protective stop first, then entry
+            if stop_order_id:
+                try:
+                    await trading.cancel_order(symbol=signal.symbol, order_id=int(stop_order_id))
+                except Exception:
+                    log.exception(
+                        "Failed to cancel stop-loss during rollback | sym=%s stop_order_id=%s",
+                        signal.symbol,
+                        stop_order_id,
+                    )
+            if order_id:
+                try:
+                    await trading.cancel_order(symbol=signal.symbol, order_id=int(order_id))
+                except Exception:
+                    log.exception(
+                        "Failed to cancel entry during rollback | sym=%s order_id=%s",
+                        signal.symbol,
+                        order_id,
+                    )
+            raise BinanceAPIException(f"create_take_profit_limit failed: {exc}") from exc
 
         # --- 8) Return ORDER STATE (entry)
         return OrderState(
@@ -366,6 +439,8 @@ class OrderExecutor:
             stop_price=signal.stop,
             quantity=q_qty,
             order_id=order_id,
+            stop_order_id=stop_order_id,
+            take_profit_order_id=take_profit_order_id,
         )
 
     # ----- sizing -----
