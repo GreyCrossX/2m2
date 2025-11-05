@@ -170,6 +170,7 @@ async def main_async() -> None:
         order_executor=order_executor,
         order_gateway=order_gateway,
         trading_factory=trading_factory,
+        position_store=position_manager,
     )
     log.info("Application services initialized")
 

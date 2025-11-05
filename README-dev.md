@@ -29,6 +29,19 @@ mypy app
 ruff check app
 ```
 
+### Targeted worker tests
+
+The order pipeline now enforces atomic placement of entry/stop/take-profit
+orders through `OrderPlacementService`. To validate the updated behaviour run:
+
+```bash
+pytest tests/unit/worker/test_order_executor.py
+```
+
+This covers trio placement success and rollback on take-profit failures, while
+exercising the new balance re-use and failure-path handling inside
+`OrderExecutor`.
+
 ## Smoke Test
 
 With `BINANCE_TESTNET=true` and valid credentials in the environment, a quick

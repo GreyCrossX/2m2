@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, MutableMapping
 
-_CONTEXT_FIELDS = ("symbol", "tf", "type", "msg_id", "prev_side")
+_CONTEXT_FIELDS = ("symbol", "tf", "type", "msg_id", "prev_side", "bot_id")
 
 
 def format_log_context(context: Mapping[str, Any]) -> str:

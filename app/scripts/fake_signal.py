@@ -244,6 +244,7 @@ async def run_dry_run(
         order_executor=order_executor,
         order_gateway=order_gateway,
         trading_factory=trading_factory,
+        position_store=position_manager,
     )
 
     # Build full ArmSignal (your model requires these fields)

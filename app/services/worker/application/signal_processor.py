@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 from dataclasses import replace
 from decimal import Decimal
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Protocol
@@ -9,7 +10,7 @@ from uuid import UUID
 from ..core.logging_utils import ensure_log_context, format_log_context
 from ..domain.enums import OrderStatus, OrderSide  # <<< changed
 from ..domain.exceptions import InvalidSignalException
-from ..domain.models import ArmSignal, BotConfig, DisarmSignal, OrderState
+from ..domain.models import ArmSignal, BotConfig, DisarmSignal, OrderState, Position
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,10 @@ class OrderExecutorPort(Protocol):
     async def execute_order(self, bot: BotConfig, signal: ArmSignal) -> OrderState: ...
 
 
+class PositionStore(Protocol):
+    def get_position(self, bot_id: UUID) -> Position | Awaitable[Optional[Position]] | None: ...
+
+
 class TradingPort(Protocol):
     async def cancel_order(self, symbol: str, order_id: int) -> None: ...
 
@@ -57,13 +62,23 @@ class SignalProcessor:
         order_executor: OrderExecutorPort,
         order_gateway: OrderGateway,
         trading_factory: Callable[[BotConfig], Awaitable[TradingPort]],
+        position_store: Optional[PositionStore] = None,
     ) -> None:
         self._router = router
         self._bots = bot_repository
         self._executor = order_executor
         self._orders = order_gateway
         self._trading_factory = trading_factory
+        self._positions = position_store
         logger.info("SignalProcessor initialized")
+
+    async def _get_position(self, bot_id: UUID) -> Optional[Position]:
+        if self._positions is None:
+            return None
+        result = self._positions.get_position(bot_id)
+        if inspect.isawaitable(result):
+            return await result  # type: ignore[return-value]
+        return result  # type: ignore[return-value]
 
     async def process_arm_signal(
         self,
@@ -105,26 +120,34 @@ class SignalProcessor:
             return results
 
         for i, bot_id in enumerate(bot_ids, 1):
-            logger.debug("Processing bot %d/%d | bot_id=%s", i, len(bot_ids), bot_id)
+            bot_context = ensure_log_context(context, bot_id=str(bot_id))
+            log_ctx = format_log_context(bot_context)
+            logger.debug("Processing bot %d/%d | bot_id=%s | %s", i, len(bot_ids), bot_id, log_ctx)
 
             bot = await self._bots.get_bot(bot_id)
             if bot is None:
-                logger.warning("Bot not found in database | bot_id=%s", bot_id)
+                logger.warning("Bot not found in database | bot_id=%s | %s", bot_id, log_ctx)
                 continue
 
             if not bot.enabled:
-                logger.info("Bot disabled, skipping | bot_id=%s | %s", bot_id, format_log_context(context))
+                logger.info("Bot disabled, skipping | bot_id=%s | %s", bot_id, log_ctx)
                 continue
 
             logger.info(
                 "Checking side whitelist | bot_id=%s bot_whitelist=%s signal_side=%s | %s",
-                bot_id, bot.side_whitelist.value, sig.side.value, format_log_context(context),
+                bot_id,
+                bot.side_whitelist.value,
+                sig.side.value,
+                log_ctx,
             )
 
             if not bot.allows_side(sig.side):
                 logger.info(
                     "Bot side whitelist blocked signal | bot_id=%s whitelist=%s signal_side=%s | %s",
-                    bot_id, bot.side_whitelist.value, sig.side.value, format_log_context(context),
+                    bot_id,
+                    bot.side_whitelist.value,
+                    sig.side.value,
+                    log_ctx,
                 )
                 state = OrderState(
                     bot_id=bot.id,
@@ -136,9 +159,20 @@ class SignalProcessor:
                     stop_price=sig.stop,
                     quantity=Decimal("0"),
                 )
-                logger.debug("Saving SKIPPED_WHITELIST state | bot_id=%s", bot_id)
+                logger.debug("Saving SKIPPED_WHITELIST state | bot_id=%s | %s", bot_id, log_ctx)
                 await self._orders.save_state(state)
                 results.append(state)
+                continue
+
+            existing_position = await self._get_position(bot.id)
+            if existing_position and existing_position.quantity > 0:
+                logger.info(
+                    "Active position open, skipping new ARM | bot_id=%s qty=%s side=%s | %s",
+                    bot_id,
+                    existing_position.quantity,
+                    existing_position.side.value,
+                    log_ctx,
+                )
                 continue
 
             allow_pyramiding = getattr(bot, "allow_pyramiding", False)
@@ -154,13 +188,16 @@ class SignalProcessor:
                         "Active trade detected, skipping new ARM | bot_id=%s active=%s | %s",
                         bot_id,
                         len(active_states),
-                        format_log_context(context),
+                        log_ctx,
                     )
                     continue
 
             logger.info(
                 "Executing order | bot_id=%s side=%s trigger=%s | %s",
-                bot_id, sig.side.value, sig.trigger, format_log_context(context),
+                bot_id,
+                sig.side.value,
+                sig.trigger,
+                log_ctx,
             )
 
             try:
@@ -174,16 +211,25 @@ class SignalProcessor:
                     state.status.value,
                     state.quantity,
                     state.order_id or "N/A",
-                    format_log_context(context),
+                    log_ctx,
                 )
 
-                logger.debug("Saving order state | bot_id=%s status=%s", bot_id, state.status.value)
+                logger.debug(
+                    "Saving order state | bot_id=%s status=%s | %s",
+                    bot_id,
+                    state.status.value,
+                    log_ctx,
+                )
                 await self._orders.save_state(state)
                 results.append(state)
             except Exception as e:
                 logger.error(
-                    "Order execution failed | bot_id=%s symbol=%s err=%s",
-                    bot_id, sig.symbol, e, exc_info=True,
+                    "Order execution failed | bot_id=%s symbol=%s err=%s | %s",
+                    bot_id,
+                    sig.symbol,
+                    e,
+                    log_ctx,
+                    exc_info=True,
                 )
                 continue
 
@@ -234,15 +280,23 @@ class SignalProcessor:
 
         total_matching = 0
         for i, bot_id in enumerate(bot_ids, 1):
-            logger.debug("Processing bot %d/%d for cancellation | bot_id=%s", i, len(bot_ids), bot_id)
+            bot_context = ensure_log_context(context, bot_id=str(bot_id))
+            log_ctx = format_log_context(bot_context)
+            logger.debug(
+                "Processing bot %d/%d for cancellation | bot_id=%s | %s",
+                i,
+                len(bot_ids),
+                bot_id,
+                log_ctx,
+            )
 
             bot = await self._bots.get_bot(bot_id)
             if bot is None:
-                logger.warning("Bot not found in database | bot_id=%s", bot_id)
+                logger.warning("Bot not found in database | bot_id=%s | %s", bot_id, log_ctx)
                 continue
 
             if not bot.enabled:
-                logger.info("Bot disabled, skipping | bot_id=%s | %s", bot_id, format_log_context(context))
+                logger.info("Bot disabled, skipping | bot_id=%s | %s", bot_id, log_ctx)
                 continue
 
             logger.debug("Fetching pending orders | bot_id=%s symbol=%s", bot_id, sig.symbol)
@@ -254,7 +308,7 @@ class SignalProcessor:
 
             logger.info(
                 "Found %d pending order(s) | bot_id=%s | %s",
-                len(pendings), bot_id, format_log_context(context),
+                len(pendings), bot_id, log_ctx,
             )
 
             for j, state in enumerate(pendings, 1):
@@ -297,7 +351,7 @@ class SignalProcessor:
                         bot_id,
                         oid,
                         state.symbol,
-                        format_log_context(context),
+                        log_ctx,
                     )
                     try:
                         await trading.cancel_order(symbol=state.symbol, order_id=int(oid))
@@ -308,7 +362,7 @@ class SignalProcessor:
                             label.capitalize(),
                             bot_id,
                             oid,
-                            format_log_context(context),
+                            log_ctx,
                         )
                     except Exception as exc:
                         logger.warning(
