@@ -194,6 +194,7 @@ class OrderExecutor:
             trigger_price=trig,
             stop_price=signal.stop,
             quantity=qty,
+            filled_quantity=Decimal("0"),
         )
 
     async def _place_order_trio(
@@ -507,6 +508,7 @@ class OrderExecutor:
             trigger_price=q_price,
             stop_price=signal.stop,
             quantity=q_qty,
+            filled_quantity=Decimal("0"),
             order_id=trio.entry_order_id,
             stop_order_id=trio.stop_order_id,
             take_profit_order_id=trio.take_profit_order_id,

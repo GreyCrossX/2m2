@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .application.balance_validator import BalanceValidator
 from .application.order_executor import OrderExecutor
+from .application.order_monitor import BinanceOrderMonitor
 from .application.position_manager import PositionManager
 from .application.signal_processor import SignalProcessor
 from .config import Config
@@ -147,7 +148,7 @@ async def main_async() -> None:
         balance_cache=balance_cache,
     )
 
-    position_manager = PositionManager(binance_client=None)
+    position_manager = PositionManager()
 
     dry_run_adapter = DryRunTradingAdapter() if cfg.dry_run_mode else None
 
@@ -162,6 +163,14 @@ async def main_async() -> None:
         balance_validator=balance_validator,
         position_manager=position_manager,
         trading_factory=trading_factory,
+    )
+
+    order_monitor = BinanceOrderMonitor(
+        bot_repository=bot_repo,
+        order_gateway=order_gateway,
+        position_manager=position_manager,
+        trading_factory=trading_factory,
+        poll_interval=float(cfg.order_monitor_interval_seconds),
     )
 
     signal_processor = SignalProcessor(
@@ -207,6 +216,10 @@ async def main_async() -> None:
     _setup_signal_handlers(stop_event)
     log.info("Signal handlers configured")
 
+    log.info("Starting order monitor...")
+    await order_monitor.start()
+    log.info("Order monitor started")
+
     log.info("Starting worker poller task...")
     runner = asyncio.create_task(poller.start(), name="worker.poller")
     log.info("WorkerPoller task started - now listening for signals")
@@ -219,6 +232,8 @@ async def main_async() -> None:
         runner.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runner
+        log.info("Stopping order monitor...")
+        await order_monitor.stop()
         log.info("Closing Redis connection...")
         await redis.aclose()
         log.info("Redis connection closed")

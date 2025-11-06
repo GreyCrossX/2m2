@@ -44,6 +44,7 @@ class Config:
     stream_block_ms: int
     catchup_threshold_ms: int
     router_refresh_seconds: int
+    order_monitor_interval_seconds: int
 
     # Balance cache
     balance_ttl_seconds: int
@@ -68,6 +69,7 @@ class Config:
             stream_block_ms=_env_int("STREAM_BLOCK_MS", 15000),
             catchup_threshold_ms=_env_int("CATCHUP_THRESHOLD_MS", 15000),
             router_refresh_seconds=_env_int("ROUTER_REFRESH_SECONDS", 60),
+            order_monitor_interval_seconds=_env_int("ORDER_MONITOR_INTERVAL_SECONDS", 3),
             balance_ttl_seconds=_env_int("BALANCE_TTL_SECONDS", 30),
             binance_connector=_env("BINANCE_CONNECTOR", "modular"),
             dry_run_mode=_env_bool("DRY_RUN_MODE", False),

@@ -22,6 +22,7 @@ _ORDER_STATUS_VALUES = (
     "armed",
     "pending",
     "filled",
+    "closed",
     "cancelled",
     "failed",
     "skipped_low_balance",
@@ -65,6 +66,9 @@ class OrderStateRecord(Base):
     trigger_price = Column(Numeric(18, 8), nullable=False)
     stop_price = Column(Numeric(18, 8), nullable=False)
     quantity = Column(Numeric(18, 8), nullable=False)
+    filled_quantity = Column(Numeric(18, 8), nullable=False, server_default=text("0"))
+    avg_fill_price = Column(Numeric(18, 8), nullable=True)
+    last_fill_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(
         DateTime(timezone=True),

@@ -6,6 +6,7 @@ class OrderStatus(str, Enum):
     ARMED = "armed"
     PENDING = "pending"
     FILLED = "filled"
+    CLOSED = "closed"
     CANCELLED = "cancelled"
     FAILED = "failed"
     SKIPPED_LOW_BALANCE = "skipped_low_balance"

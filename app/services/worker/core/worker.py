@@ -54,6 +54,7 @@ class BotWorker:
                 trigger_price=signal.trigger,
                 stop_price=signal.stop,
                 quantity=Decimal("0"),
+                filled_quantity=Decimal("0"),
             )
             self._state = st
             return st
