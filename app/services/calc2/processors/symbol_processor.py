@@ -83,22 +83,7 @@ class SymbolProcessor:
                 async for c in self.consumer.candles():
                     self._candle_count += 1
 
-                    # Catchup transition
-                    if self._catchup_mode and self._is_caught_up(c.ts):
-                        logger.info(
-                            "Catchup complete | sym=%s candles_processed=%d transitioning_to_live_mode",
-                            self.sym, self._candle_count
-                        )
-                        if self._last_signal is not None:
-                            await self.publisher.publish_signal(self._last_signal.to_stream_map())
-                            self._signal_count += 1
-                            logger.info(
-                                "Emitted final catchup signal | sym=%s type=%s count=%d",
-                                self.sym, getattr(self._last_signal, 'type', 'unknown'),
-                                self._signal_count
-                            )
-                            self._last_signal = None
-                        self._catchup_mode = False
+                    await self._handle_catchup_transition(c.ts)
 
                     # Track candle color + any other indicator tracking
                     self._update_color_trackers(c)
@@ -220,3 +205,28 @@ class SymbolProcessor:
                 await asyncio.sleep(sleep_time)
                 backoff = min(backoff * 2, self.cfg.backoff_max_s)
                 logger.info("Processor restarting | sym=%s new_backoff=%.2fs", self.sym, backoff)
+
+    async def _handle_catchup_transition(self, candle_ts: int) -> None:
+        """Flush buffered signals when historical replay catches up."""
+
+        if not self._catchup_mode or not self._is_caught_up(candle_ts):
+            return
+
+        logger.info(
+            "Catchup complete | sym=%s candles_processed=%d transitioning_to_live_mode",
+            self.sym,
+            self._candle_count,
+        )
+
+        if self._last_signal is not None:
+            await self.publisher.publish_signal(self._last_signal.to_stream_map())
+            self._signal_count += 1
+            logger.info(
+                "Emitted final catchup signal | sym=%s type=%s count=%d",
+                self.sym,
+                getattr(self._last_signal, "type", "unknown"),
+                self._signal_count,
+            )
+            self._last_signal = None
+
+        self._catchup_mode = False
