@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Dict, Optional, Protocol
+from typing import Dict, List, Optional, Protocol
 from uuid import UUID
 
 from ..domain.models import Position, OrderState
@@ -33,7 +33,7 @@ class PositionManager:
         tp_r_multiple: Decimal = Decimal("1.5"),
     ) -> None:
         self._bx = binance_client
-        self._positions: Dict[UUID, Position] = {}
+        self._positions: Dict[UUID, List[Position]] = {}
         self._tp_r = tp_r_multiple
 
     async def open_position(
@@ -74,7 +74,7 @@ class PositionManager:
             stop_loss=stop,
             take_profit=take_profit,
         )
-        self._positions[bot_id] = pos
+        self._positions.setdefault(bot_id, []).append(pos)
         return pos
 
     async def close_position(
@@ -85,17 +85,25 @@ class PositionManager:
         """
         Close at market using current qty and side inversion (reduce-only by infra).
         """
-        pos = self._positions.get(bot_id)
-        if not pos:
+        positions = self._positions.get(bot_id)
+        if not positions:
             return
-        side_str = "SELL" if pos.side == OrderSide.LONG else "BUY"  # infra expects exchange side strings
-        qty = pos.quantity
-        if qty > 0:
-            await self._bx.close_position_market(pos.symbol, side_str, qty)
+        side = positions[-1].side
+        symbol = positions[-1].symbol
+        side_str = "SELL" if side == OrderSide.LONG else "BUY"  # infra expects exchange side strings
+        quantity = sum(pos.quantity for pos in positions)
+        if quantity > 0:
+            await self._bx.close_position_market(symbol, side_str, quantity)
         self._positions.pop(bot_id, None)
 
     def get_position(self, bot_id: UUID) -> Optional[Position]:
-        return self._positions.get(bot_id)
+        positions = self._positions.get(bot_id)
+        if not positions:
+            return None
+        return positions[-1]
+
+    def get_positions(self, bot_id: UUID) -> List[Position]:
+        return list(self._positions.get(bot_id, []))
 
     async def sync_positions_from_binance(self) -> None:
         """

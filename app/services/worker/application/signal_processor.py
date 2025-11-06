@@ -47,6 +47,11 @@ class OrderExecutorPort(Protocol):
 class PositionStore(Protocol):
     def get_position(self, bot_id: UUID) -> Position | Awaitable[Optional[Position]] | None: ...
 
+    def get_positions(
+        self, bot_id: UUID
+    ) -> Iterable[Position] | Awaitable[Iterable[Position]] | None:
+        ...
+
 
 class TradingPort(Protocol):
     async def cancel_order(self, symbol: str, order_id: int) -> None: ...
@@ -72,13 +77,28 @@ class SignalProcessor:
         self._positions = position_store
         logger.info("SignalProcessor initialized")
 
-    async def _get_position(self, bot_id: UUID) -> Optional[Position]:
+    async def _get_positions(self, bot_id: UUID) -> List[Position]:
         if self._positions is None:
-            return None
-        result = self._positions.get_position(bot_id)
-        if inspect.isawaitable(result):
-            return await result  # type: ignore[return-value]
-        return result  # type: ignore[return-value]
+            return []
+
+        getter = getattr(self._positions, "get_positions", None)
+        positions: Iterable[Position] | Position | None
+
+        if getter is not None:
+            positions = getter(bot_id)
+        else:
+            positions = self._positions.get_position(bot_id)
+
+        if inspect.isawaitable(positions):  # type: ignore[truthy-bool]
+            positions = await positions  # type: ignore[misc]
+
+        if positions is None:
+            return []
+
+        if isinstance(positions, Position):
+            return [positions]
+
+        return list(positions)
 
     async def process_arm_signal(
         self,
@@ -130,7 +150,7 @@ class SignalProcessor:
                 continue
 
             if not bot.enabled:
-                logger.info("Bot disabled, skipping | bot_id=%s | %s", bot_id, log_ctx)
+                logger.info("Skipping disabled bot %s | %s", bot_id, log_ctx)
                 continue
 
             logger.info(
@@ -164,19 +184,20 @@ class SignalProcessor:
                 results.append(state)
                 continue
 
-            existing_position = await self._get_position(bot.id)
-            if existing_position and existing_position.quantity > 0:
-                logger.info(
-                    "Active position open, skipping new ARM | bot_id=%s qty=%s side=%s | %s",
-                    bot_id,
-                    existing_position.quantity,
-                    existing_position.side.value,
-                    log_ctx,
-                )
-                continue
-
             allow_pyramiding = getattr(bot, "allow_pyramiding", False)
             if not allow_pyramiding:
+                positions = await self._get_positions(bot.id)
+                open_position = next((pos for pos in positions if pos.quantity > 0), None)
+                if open_position is not None:
+                    logger.info(
+                        "Active position open, skipping new ARM | bot_id=%s qty=%s side=%s | %s",
+                        bot_id,
+                        open_position.quantity,
+                        open_position.side.value,
+                        log_ctx,
+                    )
+                    continue
+
                 active_states = await self._orders.list_pending_order_states(
                     bot.id,
                     sig.symbol,
