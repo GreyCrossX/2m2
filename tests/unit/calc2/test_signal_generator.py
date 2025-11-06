@@ -32,6 +32,46 @@ def _arm_for(
     assert getattr(arm, "type", None) == "arm"
 
 
+@pytest.mark.parametrize(
+    "target_regime,ind_high,ind_low",
+    [
+        ("long", Decimal("105"), Decimal("100")),
+        ("short", Decimal("101"), Decimal("99")),
+    ],
+)
+def test_neutral_to_trending_emits_arm(
+    generator: SignalGenerator,
+    target_regime: str,
+    ind_high: Decimal,
+    ind_low: Decimal,
+) -> None:
+    # Establish neutral baseline so _prev_regime is defined
+    assert generator.maybe_signals(
+        sym="BTCUSDT",
+        tf="2m",
+        now_ts=1,
+        regime="neutral",
+        ind_ts=1,
+        ind_high=Decimal("101"),
+        ind_low=Decimal("99"),
+    ) == []
+
+    sigs = generator.maybe_signals(
+        sym="BTCUSDT",
+        tf="2m",
+        now_ts=2,
+        regime=target_regime,
+        ind_ts=2,
+        ind_high=ind_high,
+        ind_low=ind_low,
+    )
+
+    assert len(sigs) == 1
+    arm = sigs[0]
+    assert getattr(arm, "type", None) == "arm"
+    assert getattr(arm, "side", None) == target_regime
+
+
 def test_indicator_update_emits_disarm_then_arm(generator: SignalGenerator) -> None:
     # Prime generator with neutral then short regime (initial ARM)
     assert generator.maybe_signals(
@@ -74,6 +114,47 @@ def test_indicator_update_emits_disarm_then_arm(generator: SignalGenerator) -> N
     assert getattr(disarm, "reason", None) == "update_pending"
     assert getattr(new_arm, "type", None) == "arm"
     assert getattr(new_arm, "ind_ts", None) == 3
+
+
+def test_regime_flip_emits_disarm_then_arm(generator: SignalGenerator) -> None:
+    # Prime neutral -> long
+    assert generator.maybe_signals(
+        sym="BTCUSDT",
+        tf="2m",
+        now_ts=1,
+        regime="neutral",
+        ind_ts=1,
+        ind_high=Decimal("101"),
+        ind_low=Decimal("99"),
+    ) == []
+
+    long_sigs = generator.maybe_signals(
+        sym="BTCUSDT",
+        tf="2m",
+        now_ts=2,
+        regime="long",
+        ind_ts=2,
+        ind_high=Decimal("105"),
+        ind_low=Decimal("100"),
+    )
+    assert len(long_sigs) == 1
+
+    flip_sigs = generator.maybe_signals(
+        sym="BTCUSDT",
+        tf="2m",
+        now_ts=3,
+        regime="short",
+        ind_ts=3,
+        ind_high=Decimal("102"),
+        ind_low=Decimal("98"),
+    )
+
+    assert len(flip_sigs) == 2
+    disarm, arm = flip_sigs
+    assert getattr(disarm, "type", None) == "disarm"
+    assert getattr(disarm, "reason", None) == "flip:long->short"
+    assert getattr(arm, "type", None) == "arm"
+    assert getattr(arm, "side", None) == "short"
 
 
 def test_same_indicator_no_duplicate_signals(generator: SignalGenerator) -> None:
