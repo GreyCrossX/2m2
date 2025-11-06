@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_DOWN
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 from app.services.domain.exceptions import DomainBadRequest, DomainExchangeError
 from app.services.worker.domain.enums import OrderSide  # domain side
@@ -421,6 +421,12 @@ class BinanceTrading:
 
     async def cancel_order(self, symbol: str, order_id: int) -> Dict[str, Any]:
         return await self._client.cancel_order(symbol=symbol.upper(), orderId=int(order_id))
+
+    async def get_order(self, symbol: str, order_id: int) -> Dict[str, Any]:
+        return await self._client.query_order(symbol=symbol.upper(), orderId=int(order_id))
+
+    async def list_open_orders(self, symbol: str | None = None) -> List[Dict[str, Any]]:
+        return await self._client.open_orders(symbol=symbol)
 
     async def get_order_status(self, symbol: str, order_id: int) -> str:
         result = await self._client.query_order(symbol=symbol.upper(), orderId=int(order_id))

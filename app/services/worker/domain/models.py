@@ -261,6 +261,9 @@ class OrderState:
     trigger_price: Decimal
     stop_price: Decimal
     quantity: Decimal
+    filled_quantity: Decimal = Decimal("0")
+    avg_fill_price: Optional[Decimal] = None
+    last_fill_at: Optional[datetime] = None
 
     id: UUID = field(default_factory=uuid4)
     order_id: Optional[int] = None   # Binance-assigned orderId (int per UMFutures)
@@ -276,6 +279,18 @@ class OrderState:
         self.status = status
         if order_id is not None:
             self.order_id = order_id
+        self.touch()
+
+    def record_fill(
+        self,
+        *,
+        quantity: Decimal,
+        price: Decimal,
+        fill_time: Optional[datetime] = None,
+    ) -> None:
+        self.filled_quantity = quantity
+        self.avg_fill_price = price
+        self.last_fill_at = fill_time or datetime.now(timezone.utc)
         self.touch()
 
 

@@ -288,6 +288,20 @@ class BinanceUSDS:
         prepared = self._translate_params(params, self._QUERY_PARAM_ALIASES)
         return self._call_with_retries(self._rest.cancel_order, **prepared)
 
+    def open_orders(self, **params: Any) -> list[dict]:
+        """Return current open orders."""
+
+        prepared = self._translate_params(params, self._QUERY_PARAM_ALIASES)
+        method = getattr(self._rest, "open_orders", None) or getattr(
+            self._rest, "current_open_orders", None
+        )
+        if method is None:
+            return []
+        data = self._call_with_retries(method, **prepared)
+        if isinstance(data, list):
+            return data
+        return [] if data is None else [data]
+
     def change_leverage(self, symbol: str, leverage: int) -> dict:
         """Change the leverage for a symbol."""
 

@@ -34,6 +34,9 @@ def _from_domain(s: OrderState) -> dict:
         trigger_price=Decimal(s.trigger_price),
         stop_price=Decimal(s.stop_price),
         quantity=Decimal(s.quantity),
+        filled_quantity=Decimal(s.filled_quantity or 0),
+        avg_fill_price=Decimal(s.avg_fill_price) if s.avg_fill_price is not None else None,
+        last_fill_at=s.last_fill_at,
         created_at=s.created_at,
         updated_at=s.updated_at,
     )
@@ -71,6 +74,13 @@ def _to_domain(r: OrderStateRecord) -> OrderState:
         trigger_price=Decimal(r.trigger_price),
         stop_price=Decimal(r.stop_price),
         quantity=Decimal(r.quantity),
+        filled_quantity=Decimal(getattr(r, "filled_quantity", 0) or 0),
+        avg_fill_price=(
+            Decimal(r.avg_fill_price)
+            if getattr(r, "avg_fill_price", None) is not None
+            else None
+        ),
+        last_fill_at=getattr(r, "last_fill_at", None),
         created_at=r.created_at,
         updated_at=r.updated_at,
     )
@@ -137,6 +147,19 @@ class OrderGateway:
                         OrderStateRecord.order_id.isnot(None),  # << key change
                     )
                 )
+            )
+            res = await session.execute(stmt)
+            return [_to_domain(r) for r in res.scalars().all()]
+
+    async def list_states_by_statuses(
+        self,
+        statuses: Sequence[OrderStatus],
+    ) -> List[OrderState]:
+        async with self._session_factory() as session:
+            stmt = (
+                select(OrderStateRecord)
+                .where(OrderStateRecord.status.in_([s.value for s in statuses]))
+                .order_by(OrderStateRecord.updated_at.desc())
             )
             res = await session.execute(stmt)
             return [_to_domain(r) for r in res.scalars().all()]

@@ -189,6 +189,15 @@ class BinanceClient:
         logger.debug("binance_cancel_order", extra={"payload": self._redact_payload(payload)})
         return await self._call(self._gateway.cancel_order, **payload)
 
+    async def open_orders(self, symbol: str | None = None) -> list[dict]:
+        params: Dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol.upper()
+        result = await self._call(self._gateway.open_orders, **params)
+        if isinstance(result, list):
+            return result
+        return [] if result is None else [result]
+
     async def close_position_market(
         self,
         symbol: str,

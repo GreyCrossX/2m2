@@ -27,6 +27,7 @@ class DryRunTradingAdapter:
 
     def __init__(self) -> None:
         self._id_counter = count(1)
+        self._orders: Dict[int, Dict[str, Any]] = {}
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         log.info("[dry-run] set_leverage noop | symbol=%s leverage=%s", symbol, leverage)
@@ -62,9 +63,18 @@ class DryRunTradingAdapter:
             "timeInForce": time_in_force,
             "newClientOrderId": new_client_order_id,
         }
-        order_id = f"dryrun-entry-{next(self._id_counter)}"
+        order_id = int(next(self._id_counter))
         log.info("[dry-run] create_limit_order | order_id=%s payload=%s", order_id, payload)
-        return {"orderId": order_id, "dryRun": True, "payload": payload}
+        record = {
+            "orderId": order_id,
+            "dryRun": True,
+            "payload": payload,
+            "status": "NEW",
+            "executedQty": "0",
+            "price": payload.get("price"),
+        }
+        self._orders[order_id] = record
+        return record
 
     async def create_take_profit_limit(
         self,
@@ -88,14 +98,36 @@ class DryRunTradingAdapter:
             "timeInForce": time_in_force,
             "newClientOrderId": new_client_order_id,
         }
-        order_id = f"dryrun-tp-{next(self._id_counter)}"
+        order_id = int(next(self._id_counter))
         log.info(
             "[dry-run] create_take_profit_limit | order_id=%s payload=%s",
             order_id,
             payload,
         )
-        return {"orderId": order_id, "dryRun": True, "payload": payload}
+        record = {
+            "orderId": order_id,
+            "dryRun": True,
+            "payload": payload,
+            "status": "NEW",
+            "executedQty": "0",
+            "price": payload.get("price"),
+            "stopPrice": payload.get("stopPrice"),
+        }
+        self._orders[order_id] = record
+        return record
 
     async def get_symbol_filters(self, symbol: str) -> Dict[str, Dict[str, Any]]:
         log.info("[dry-run] get_symbol_filters | symbol=%s", symbol)
         return self._DEFAULT_FILTERS
+
+    async def cancel_order(self, *, symbol: str, order_id: int) -> None:
+        log.info("[dry-run] cancel_order | symbol=%s order_id=%s", symbol, order_id)
+        order = self._orders.get(int(order_id))
+        if order:
+            order["status"] = "CANCELED"
+
+    async def get_order(self, symbol: str, order_id: int) -> Dict[str, Any]:
+        return self._orders.get(int(order_id), {"orderId": order_id, "status": "NEW", "executedQty": "0"})
+
+    async def list_open_orders(self, symbol: str | None = None) -> list[dict]:
+        return [o for o in self._orders.values() if o.get("status") not in {"CANCELED", "FILLED"}]

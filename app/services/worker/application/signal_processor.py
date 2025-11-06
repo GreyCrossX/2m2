@@ -178,6 +178,7 @@ class SignalProcessor:
                     trigger_price=sig.trigger,
                     stop_price=sig.stop,
                     quantity=Decimal("0"),
+                    filled_quantity=Decimal("0"),
                 )
                 logger.debug("Saving SKIPPED_WHITELIST state | bot_id=%s | %s", bot_id, log_ctx)
                 await self._orders.save_state(state)
