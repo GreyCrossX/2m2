@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Awaitable, Callable, Optional, Protocol
 from uuid import UUID
 
@@ -90,14 +90,52 @@ class PositionManagerPort(Protocol):
 
 # --------- Use Case ---------
 
-Q_STEP = Decimal("0.001")  # hard 3-decimal precision for qty (per requirement)
 NOTIONAL_FALLBACK = Decimal("20")  # safety default if filters missing
 
-def _floor3(x: Decimal) -> Decimal:
-    return (x / Q_STEP).to_integral_value(rounding=ROUND_FLOOR) * Q_STEP
 
-def _ceil3(x: Decimal) -> Decimal:
-    return (x / Q_STEP).to_integral_value(rounding=ROUND_CEILING) * Q_STEP
+def _to_decimal(value: object, *, default: Decimal = Decimal("0")) -> Decimal:
+    try:
+        if value in (None, ""):
+            return default
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
+
+
+def _quantize_by_precision(value: Decimal, precision: int, rounding) -> Decimal:
+    precision = max(0, precision)
+    quantum = Decimal(1).scaleb(-precision)
+    return value.quantize(quantum, rounding=rounding)
+
+
+def _floor_to_step(value: Decimal, step: Decimal, precision: int | None) -> Decimal:
+    if value <= 0:
+        return Decimal("0")
+    if step > 0:
+        multiples = (value / step).to_integral_value(rounding=ROUND_FLOOR)
+        floored = multiples * step
+        return floored.quantize(step, rounding=ROUND_FLOOR)
+    if precision is not None:
+        try:
+            return _quantize_by_precision(value, precision, ROUND_FLOOR)
+        except (InvalidOperation, ValueError):
+            return _quantize_by_precision(value, 6, ROUND_FLOOR)
+    return value.quantize(Decimal("0.000001"), rounding=ROUND_FLOOR)
+
+
+def _ceil_to_step(value: Decimal, step: Decimal, precision: int | None) -> Decimal:
+    if value <= 0:
+        return Decimal("0")
+    if step > 0:
+        multiples = (value / step).to_integral_value(rounding=ROUND_CEILING)
+        ceiled = multiples * step
+        return ceiled.quantize(step, rounding=ROUND_CEILING)
+    if precision is not None:
+        try:
+            return _quantize_by_precision(value, precision, ROUND_CEILING)
+        except (InvalidOperation, ValueError):
+            return _quantize_by_precision(value, 6, ROUND_CEILING)
+    return value.quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
 
 
 class OrderExecutor:
@@ -205,8 +243,14 @@ class OrderExecutor:
             return trigger + (distance * r)
         return trigger - (distance * r)
 
-    async def _min_notional_for(self, trading: TradingPort, symbol: str) -> Decimal:
-        f = await trading.get_symbol_filters(symbol)
+    async def _min_notional_for(
+        self,
+        trading: TradingPort,
+        symbol: str,
+        *,
+        filters: dict | None = None,
+    ) -> Decimal:
+        f = filters or await trading.get_symbol_filters(symbol)
         mn = (f.get("MIN_NOTIONAL") or f.get("NOTIONAL") or {})
         mn_val = mn.get("notional") or mn.get("minNotional") or mn.get("minNotionalValue")
         try:
@@ -227,21 +271,54 @@ class OrderExecutor:
         Enforce 3dp qty and min-notional; re-check margin after bump.
         Returns (ok, q_qty, reason_if_not_ok)
         """
-        q_qty = _floor3(raw_qty)
-        min_notional = await self._min_notional_for(trading, symbol)
+        filters = await trading.get_symbol_filters(symbol)
+        lot = filters.get("LOT_SIZE", {}) or {}
+        step = _to_decimal(lot.get("stepSize"))
+        min_qty = _to_decimal(lot.get("minQty"))
+        max_qty = _to_decimal(lot.get("maxQty"))
+        meta = filters.get("META", {}) or {}
+        qty_precision: int | None = None
+        try:
+            qty_precision = int(meta.get("quantityPrecision")) if meta.get("quantityPrecision") is not None else None
+        except (TypeError, ValueError):
+            qty_precision = None
+
+        q_qty = _floor_to_step(raw_qty, step, qty_precision)
+
+        if min_qty > 0 and (q_qty <= 0 or q_qty < min_qty):
+            q_qty = _ceil_to_step(min_qty, step, qty_precision)
+
+        if max_qty > 0 and q_qty > max_qty:
+            q_qty = _floor_to_step(max_qty, step, qty_precision)
+
+        min_notional = await self._min_notional_for(trading, symbol, filters=filters)
         notional = q_qty * price
         if notional < min_notional:
-            min_qty = _ceil3(min_notional / price)
-            q_qty = min_qty
+            needed_qty = _ceil_to_step(min_notional / price, step, qty_precision)
+            q_qty = needed_qty
 
-        required_margin = (q_qty * price) / lev
+        if min_qty > 0 and q_qty < min_qty:
+            q_qty = _ceil_to_step(min_qty, step, qty_precision)
+
+        if max_qty > 0 and q_qty > max_qty:
+            q_qty = _floor_to_step(max_qty, step, qty_precision)
+
+        final_notional = q_qty * price
+        if final_notional < min_notional:
+            return (
+                False,
+                q_qty,
+                f"min_notional_not_met(required={min_notional}, actual={final_notional})",
+            )
+
+        required_margin = final_notional / lev
         if required_margin > balance_free:
             return (False, q_qty, f"insufficient_margin_after_min_notional(required={required_margin}, free={balance_free})")
 
         if q_qty <= 0:
             return (False, q_qty, "qty_zero_after_round")
 
-        log.info(
+        log.debug(
             "[preflight] sym=%s raw_qty=%s q_qty=%s price=%s min_notional=%s notional=%s lev=%s req_margin=%s free=%s",
             symbol, str(raw_qty), str(q_qty), str(price), str(min_notional),
             str(q_qty * price), str(lev), str(required_margin), str(balance_free),
@@ -263,12 +340,12 @@ class OrderExecutor:
 
         # --- 1) Fetch available balance (authoritative, cached by BalanceValidator)
         available = await self._bal.get_available_balance(bot.cred_id, bot.env)
-        log.info("[balance.fetch] available=%s | %s", str(available), ctx_str)
+        log.debug("[balance.fetch] available=%s | %s", str(available), ctx_str)
 
         # --- 2) Compute intended size
         qty = self._calculate_position_size(bot, available, signal.trigger)
         if qty <= 0:
-            log.info(
+            log.debug(
                 "[sizing] zero/negative qty -> skip | available=%s trigger=%s cfg: (use_pct=%s pct=%s fixed=%s max_usdt=%s) | %s",
                 str(available),
                 str(signal.trigger),
@@ -295,7 +372,7 @@ class OrderExecutor:
             )
             return self._failure_state(bot, signal)
 
-        log.info(
+        log.debug(
             "[sizing] qty=%s price=%s exposure=%s lev=%s required_margin=%s | %s",
             str(qty),
             str(signal.trigger),
@@ -311,7 +388,7 @@ class OrderExecutor:
             required_margin,
             available_balance=available,
         )
-        log.info(
+        log.debug(
             "[balance] available=%s required=%s pass=%s | %s",
             str(avail_check),
             str(required_margin),
@@ -403,10 +480,10 @@ class OrderExecutor:
             )
         except (BinanceBadRequestException, BinanceRateLimitException, BinanceExchangeDownException) as exc:
             log.warning("Order placement failed | %s reason=%s", ctx_str, exc)
-            return self._failure_state(bot, signal)
+            return self._failure_state(bot, signal, quantity=q_qty, trigger_price=q_price)
         except BinanceAPIException as exc:
             log.error("Order placement failed | %s reason=%s", ctx_str, exc)
-            return self._failure_state(bot, signal)
+            return self._failure_state(bot, signal, quantity=q_qty, trigger_price=q_price)
 
         log.info(
             "Order trio placed | qty=%s entry_price=%s stop=%s tp=%s entry_id=%s stop_id=%s tp_id=%s | %s",
