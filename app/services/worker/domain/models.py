@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Mapping, Optional, Union
 from uuid import UUID, uuid4
 
 from .enums import OrderStatus, SignalType, OrderSide, SideWhitelist
@@ -12,6 +12,7 @@ from .exceptions import InvalidSignalException
 
 # ---------- helpers (pure, domain-level) ----------
 
+
 def _parse_decimal(name: str, value: Any) -> Decimal:
     if value is None:
         raise InvalidSignalException(f"Missing decimal field: {name}")
@@ -19,7 +20,9 @@ def _parse_decimal(name: str, value: Any) -> Decimal:
         # Accept str/float/Decimal
         return value if isinstance(value, Decimal) else Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError) as exc:
-        raise InvalidSignalException(f"Invalid decimal for '{name}': {value!r}") from exc
+        raise InvalidSignalException(
+            f"Invalid decimal for '{name}': {value!r}"
+        ) from exc
 
 
 def _parse_int(name: str, value: Any) -> int:
@@ -28,7 +31,9 @@ def _parse_int(name: str, value: Any) -> int:
     try:
         return int(value)
     except (ValueError, TypeError) as exc:
-        raise InvalidSignalException(f"Invalid integer for '{name}': {value!r}") from exc
+        raise InvalidSignalException(
+            f"Invalid integer for '{name}': {value!r}"
+        ) from exc
 
 
 def _ms_to_datetime(ms: int) -> datetime:
@@ -71,6 +76,7 @@ def _parse_whitelist_side(name: str, value: Any) -> SideWhitelist:
 
 # ---------- Signals ----------
 
+
 @dataclass(frozen=True)
 class ArmSignal:
     """
@@ -91,6 +97,7 @@ class ArmSignal:
       "stop": "34899.25"
     }
     """
+
     version: str
     side: OrderSide
     symbol: str
@@ -166,6 +173,7 @@ class DisarmSignal:
       "reason": "regime:long->neutral" | "flip:long->short"
     }
     """
+
     version: str
     prev_side: OrderSide
     symbol: str
@@ -211,12 +219,14 @@ Signal = Union[ArmSignal, DisarmSignal]
 
 # ---------- Bot configuration ----------
 
+
 @dataclass(frozen=True)
 class BotConfig:
     """
     Bot configuration as read from persistent storage (e.g., Postgres).
     Only domain-relevant attributes are modeled here.
     """
+
     id: UUID
     user_id: UUID
     cred_id: UUID
@@ -230,9 +240,9 @@ class BotConfig:
     leverage: int
 
     use_balance_pct: bool
-    balance_pct: Decimal                 # used if use_balance_pct is True
-    fixed_notional: Optional[Decimal]    # alternative sizing mode
-    max_position_usdt: Optional[Decimal] # risk cap per position
+    balance_pct: Decimal  # used if use_balance_pct is True
+    fixed_notional: Optional[Decimal]  # alternative sizing mode
+    max_position_usdt: Optional[Decimal]  # risk cap per position
 
     def allows_side(self, side: OrderSide) -> bool:
         """Check if the bot is configured to trade the given side."""
@@ -245,6 +255,7 @@ class BotConfig:
 
 # ---------- Order lifecycle state ----------
 
+
 @dataclass
 class OrderState:
     """
@@ -252,8 +263,9 @@ class OrderState:
 
     Note: timestamps are UTC.
     """
+
     bot_id: UUID
-    signal_id: str                   # Redis stream message ID
+    signal_id: str  # Redis stream message ID
     status: OrderStatus
     side: OrderSide
     symbol: str
@@ -266,7 +278,7 @@ class OrderState:
     last_fill_at: Optional[datetime] = None
 
     id: UUID = field(default_factory=uuid4)
-    order_id: Optional[int] = None   # Binance-assigned orderId (int per UMFutures)
+    order_id: Optional[int] = None  # Binance-assigned orderId (int per UMFutures)
     stop_order_id: Optional[int] = None
     take_profit_order_id: Optional[int] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -296,11 +308,13 @@ class OrderState:
 
 # ---------- Position tracking ----------
 
+
 @dataclass
 class Position:
     """
     Represents an open position associated with a bot.
     """
+
     bot_id: UUID
     symbol: str
     side: OrderSide

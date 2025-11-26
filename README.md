@@ -4,7 +4,7 @@ An end-to-end Binance USDS futures trading stack built around FastAPI, Redis Str
 
 ## Quick Start
 1. **Install deps** (Python 3.11+): `pipenv install --dev`  
-2. **Configure env**: copy `.env` and set `DATABASE_URL`/`DB_URL`, `REDIS_URL`, `SECRET_KEY`, `CREDENTIALS_MASTER_KEY`, and Binance keys (`BINANCE_API_KEY`/`BINANCE_API_SECRET` or user-specific creds).  
+2. **Configure env**: copy `.env.example` to `.env` and set `DATABASE_URL`/`DB_URL`, `REDIS_URL`, `SECRET_KEY`, `CREDENTIALS_MASTER_KEY`, and Binance keys (`BINANCE_API_KEY`/`BINANCE_API_SECRET` or user-specific creds).  
 3. **Migrate DB**: `alembic -c alembic.ini upgrade head`  
 4. **Run services locally** (separate shells):  
    - API: `uvicorn app.main:app --reload --port 8000`  
@@ -29,6 +29,13 @@ An end-to-end Binance USDS futures trading stack built around FastAPI, Redis Str
 - Worker-specific: `WORKER_SYMBOLS`, `TIMEFRAME`, `DRY_RUN_MODE`, `POSTGRES_DSN` (typically same as `DATABASE_URL`).  
 - Ingestor: `PAIRS_1M`, `BACKFILL_ON_START`, `STREAM_MAXLEN_*`, `STREAM_RETENTION_MS_*`.
 
+## Per-Service Commands (local)
+- API: `uvicorn app.main:app --reload --port 8000`
+- Ingestor: `python -m services.ingestor.main`
+- Calc2: `python -m services.calc2.main`
+- Worker: `python -m services.worker.main` (set `CREDENTIALS_MASTER_KEY` and DB/Redis DSNs)
+- Docker Compose (all services): `docker compose up --build`
+
 ## Testing & Smoke Checks
 - Unit tests: `pytest -q` (or target worker: `pytest tests/unit/worker`).  
 - Static checks: `mypy app` and `ruff check app`.  
@@ -43,6 +50,9 @@ An end-to-end Binance USDS futures trading stack built around FastAPI, Redis Str
 - `services/ingestor`: Binance WS ingestion → Redis Streams.
 - `services/calc2`: Indicator/regime/signal pipeline consuming Redis streams.
 - `services/worker`: Signal processing, order execution, monitoring, Binance adapters, Postgres/Redis gateways.
+
+## Diagrams
+- Startup flow: API serves auth/credentials; ingestor -> Redis streams -> calc2 signals -> worker executes orders. (Add architecture diagram here if you have one; see `architecture.md` for text outline.)
 
 ## Notes
 - Ensure `SECRET_KEY` and `CREDENTIALS_MASTER_KEY` are set before starting the API or worker; missing keys will prevent credential storage/decryption and invalidate JWTs.

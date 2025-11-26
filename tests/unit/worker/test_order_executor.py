@@ -57,7 +57,9 @@ class TradingStub:
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         return None
 
-    async def quantize_limit_order(self, symbol: str, quantity: Decimal, price: Decimal) -> tuple[Decimal, Decimal]:
+    async def quantize_limit_order(
+        self, symbol: str, quantity: Decimal, price: Decimal
+    ) -> tuple[Decimal, Decimal]:
         return quantity, price
 
     async def create_limit_order(self, **payload) -> dict:
@@ -397,7 +399,9 @@ def test_compute_tp_price_handles_inverted_stops() -> None:
     executor = OrderExecutor(balance_validator=balance, binance_client=TradingStub())
 
     long_tp = executor._compute_tp_price(OrderSide.LONG, Decimal("100"), Decimal("105"))
-    short_tp = executor._compute_tp_price(OrderSide.SHORT, Decimal("100"), Decimal("95"))
+    short_tp = executor._compute_tp_price(
+        OrderSide.SHORT, Decimal("100"), Decimal("95")
+    )
 
     rr = executor._tp_r
     assert long_tp == Decimal("100") + (Decimal("5") * rr)

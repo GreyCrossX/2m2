@@ -6,10 +6,19 @@ import time
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
+from app.services.ingestor.redis_io import r  # shared Redis client
+from app.services.tasks.state import (
+    write_bot_config,
+    read_bot_config,
+    index_bot,
+)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Optional DB plumbing (seed a user/cred/bot if DB is configured)
 # ──────────────────────────────────────────────────────────────────────────────
-DB_URL = (os.getenv("DATABASE_URL") or os.getenv("DB_URL") or "").replace("+asyncpg", "")
+DB_URL = (os.getenv("DATABASE_URL") or os.getenv("DB_URL") or "").replace(
+    "+asyncpg", ""
+)
 USE_DB = bool(DB_URL)
 
 if USE_DB:
@@ -24,15 +33,6 @@ if USE_DB:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Redis + task-layer adapters
-# ──────────────────────────────────────────────────────────────────────────────
-from app.services.ingestor.redis_io import r  # shared Redis client
-
-from app.services.tasks.state import (
-    write_bot_config,
-    read_bot_config,
-    index_bot,
-)
-
 # filters seeding is optional; only used if available
 try:
     from app.services.tasks.filters_source import set_symbol_filters  # type: ignore
@@ -47,6 +47,7 @@ def _to_str(v: Any) -> str:
     if isinstance(v, Decimal):
         return format(v, "f")
     return str(v)
+
 
 def stream_signal_by_tag(tag: str) -> str:
     """Canonical calc/poller stream name: stream:signal|{SYM:TF}"""
@@ -71,12 +72,13 @@ def upsert_user(session, email="tester@example.com"):
     session.flush()
     return u
 
+
 def upsert_cred(session, user, label="default", env="testnet"):
     c = session.execute(
         select(ApiCredential).where(
-            (ApiCredential.user_id == user.id) &
-            (ApiCredential.env == env) &
-            (ApiCredential.label == label)
+            (ApiCredential.user_id == user.id)
+            & (ApiCredential.env == env)
+            & (ApiCredential.label == label)
         )
     ).scalar_one_or_none()
     if c:
@@ -88,13 +90,16 @@ def upsert_cred(session, user, label="default", env="testnet"):
         raise SystemExit("TESTNET_API_KEY / TESTNET_API_SECRET missing in env")
 
     c = ApiCredential(
-        user_id=user.id, env=env, label=label,
-        api_key_encrypted=k,           # plaintext OK in dev
+        user_id=user.id,
+        env=env,
+        label=label,
+        api_key_encrypted=k,  # plaintext OK in dev
         api_secret_encrypted=s,
     )
     session.add(c)
     session.flush()
     return c
+
 
 def upsert_bot(session, user, cred, symbol="BTCUSDT"):
     b = session.execute(
@@ -161,6 +166,7 @@ DEFAULT_FILTERS = {
     "minNotional": "5",
 }
 
+
 def maybe_seed_filters(sym: str = "BTCUSDT") -> None:
     if set_symbol_filters is None:
         print("[filters] Skipped (filters_source.set_symbol_filters not available).")
@@ -179,7 +185,7 @@ def emit_fake_arm(
     *,
     sym: str = "BTCUSDT",
     tf: str = "2m",
-    side: str = "long",           # or "short"
+    side: str = "long",  # or "short"
     trigger: str = "65000.0",
     stop: str = "64850.0",
     ind_ts_ms: Optional[int] = None,
@@ -191,7 +197,7 @@ def emit_fake_arm(
     fields = {
         "v": "1",
         "type": "arm",
-        "side": side,      # "long" | "short"
+        "side": side,  # "long" | "short"
         "sym": sym.upper(),
         "tf": tf,
         "ts": str(ts),
@@ -213,13 +219,13 @@ if __name__ == "__main__":
     stop = os.getenv("SEED_STOP", "64850.0")
 
     # Defaults/tunables
-    risk = Decimal(os.getenv("SEED_RISK", "0.005"))   # 0.5%
-    lev  = Decimal(os.getenv("SEED_LEV", "5"))
-    tp   = Decimal(os.getenv("SEED_TP", "1.5"))
+    risk = Decimal(os.getenv("SEED_RISK", "0.005"))  # 0.5%
+    lev = Decimal(os.getenv("SEED_LEV", "5"))
+    tp = Decimal(os.getenv("SEED_TP", "1.5"))
 
     # 1) Optional DB seed
     user_id = "user-dev"
-    bot_id  = "bot-dev"
+    bot_id = "bot-dev"
 
     if USE_DB:
         with Session(engine) as s:
@@ -228,12 +234,14 @@ if __name__ == "__main__":
             b = upsert_bot(s, u, c, symbol=sym)
             s.commit()
             user_id = str(u.id)
-            bot_id  = str(b.id)
+            bot_id = str(b.id)
             print("DB seeded:", {"user": user_id, "cred": str(c.id), "bot": bot_id})
     else:
         user_id = os.getenv("SEED_USER_ID", user_id)
-        bot_id  = os.getenv("SEED_BOT_ID", bot_id)
-        print("DB not configured; using in-memory IDs:", {"user": user_id, "bot": bot_id})
+        bot_id = os.getenv("SEED_BOT_ID", bot_id)
+        print(
+            "DB not configured; using in-memory IDs:", {"user": user_id, "bot": bot_id}
+        )
 
     # 2) Redis bot config + index
     cfg = seed_bot_in_redis(
@@ -257,4 +265,6 @@ if __name__ == "__main__":
     # 4) Emit ARM into calc’s signal stream (poller → Celery → actions/exchange)
     msg_id = emit_fake_arm(sym=sym, side=side, trigger=trigger, stop=stop)
     print(f"Emitted ARM to Redis stream for {sym}: msg_id={msg_id}")
-    print("If poller and workers are up, watch the logs in `poller` and `worker-signals`.")
+    print(
+        "If poller and workers are up, watch the logs in `poller` and `worker-signals`."
+    )

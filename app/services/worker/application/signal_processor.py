@@ -17,11 +17,13 @@ logger = logging.getLogger(__name__)
 
 class SymbolRouter(Protocol):
     """Port for routing/lookup: which bots are subscribed to a (symbol, timeframe)."""
+
     def get_bot_ids(self, symbol: str, timeframe: str) -> Iterable[UUID]: ...
 
 
 class BotRepository(Protocol):
     """Port to load BotConfig."""
+
     async def get_bot(self, bot_id: UUID) -> Optional[BotConfig]: ...
 
 
@@ -41,16 +43,18 @@ class OrderGateway(Protocol):
 
 class OrderExecutorPort(Protocol):
     """Use case that actually creates an order (we'll inject OrderExecutor)."""
+
     async def execute_order(self, bot: BotConfig, signal: ArmSignal) -> OrderState: ...
 
 
 class PositionStore(Protocol):
-    def get_position(self, bot_id: UUID) -> Position | Awaitable[Optional[Position]] | None: ...
+    def get_position(
+        self, bot_id: UUID
+    ) -> Position | Awaitable[Optional[Position]] | None: ...
 
     def get_positions(
         self, bot_id: UUID
-    ) -> Iterable[Position] | Awaitable[Iterable[Position]] | None:
-        ...
+    ) -> Iterable[Position] | Awaitable[Iterable[Position]] | None: ...
 
 
 class TradingPort(Protocol):
@@ -133,20 +137,33 @@ class SignalProcessor:
         results: List[OrderState] = []
         bot_ids = list(self._router.get_bot_ids(sig.symbol, sig.timeframe))
 
-        logger.info("Found %d bot(s) subscribed | %s", len(bot_ids), format_log_context(context))
+        logger.info(
+            "Found %d bot(s) subscribed | %s", len(bot_ids), format_log_context(context)
+        )
 
         if not bot_ids:
-            logger.warning("No bots subscribed - signal will not be processed | %s", format_log_context(context))
+            logger.warning(
+                "No bots subscribed - signal will not be processed | %s",
+                format_log_context(context),
+            )
             return results
 
         for i, bot_id in enumerate(bot_ids, 1):
             bot_context = ensure_log_context(context, bot_id=str(bot_id))
             log_ctx = format_log_context(bot_context)
-            logger.debug("Processing bot %d/%d | bot_id=%s | %s", i, len(bot_ids), bot_id, log_ctx)
+            logger.debug(
+                "Processing bot %d/%d | bot_id=%s | %s",
+                i,
+                len(bot_ids),
+                bot_id,
+                log_ctx,
+            )
 
             bot = await self._bots.get_bot(bot_id)
             if bot is None:
-                logger.warning("Bot not found in database | bot_id=%s | %s", bot_id, log_ctx)
+                logger.warning(
+                    "Bot not found in database | bot_id=%s | %s", bot_id, log_ctx
+                )
                 continue
 
             if not bot.enabled:
@@ -180,7 +197,9 @@ class SignalProcessor:
                     quantity=Decimal("0"),
                     filled_quantity=Decimal("0"),
                 )
-                logger.debug("Saving SKIPPED_WHITELIST state | bot_id=%s | %s", bot_id, log_ctx)
+                logger.debug(
+                    "Saving SKIPPED_WHITELIST state | bot_id=%s | %s", bot_id, log_ctx
+                )
                 await self._orders.save_state(state)
                 results.append(state)
                 continue
@@ -188,7 +207,9 @@ class SignalProcessor:
             allow_pyramiding = getattr(bot, "allow_pyramiding", False)
             if not allow_pyramiding:
                 positions = await self._get_positions(bot.id)
-                open_position = next((pos for pos in positions if pos.quantity > 0), None)
+                open_position = next(
+                    (pos for pos in positions if pos.quantity > 0), None
+                )
                 if open_position is not None:
                     logger.info(
                         "Active position open, skipping new ARM | bot_id=%s qty=%s side=%s | %s",
@@ -203,7 +224,11 @@ class SignalProcessor:
                     bot.id,
                     sig.symbol,
                     sig.side,
-                    statuses=(OrderStatus.PENDING, OrderStatus.ARMED, OrderStatus.FILLED),
+                    statuses=(
+                        OrderStatus.PENDING,
+                        OrderStatus.ARMED,
+                        OrderStatus.FILLED,
+                    ),
                 )
                 if active_states:
                     logger.info(
@@ -257,7 +282,9 @@ class SignalProcessor:
 
         logger.info(
             "ARM signal processing complete | bots_processed=%d results=%d | %s",
-            len(bot_ids), len(results), format_log_context(context),
+            len(bot_ids),
+            len(results),
+            format_log_context(context),
         )
 
         status_counts: Dict[str, int] = {}
@@ -289,15 +316,24 @@ class SignalProcessor:
             msg_id=message_id,
             prev_side=sig.prev_side.value,
         )
-        logger.info("Processing DISARM signal | reason=%s | %s", sig.reason, format_log_context(context))
+        logger.info(
+            "Processing DISARM signal | reason=%s | %s",
+            sig.reason,
+            format_log_context(context),
+        )
 
         cancelled: List[str] = []
         bot_ids = list(self._router.get_bot_ids(sig.symbol, sig.timeframe))
 
-        logger.info("Found %d bot(s) subscribed | %s", len(bot_ids), format_log_context(context))
+        logger.info(
+            "Found %d bot(s) subscribed | %s", len(bot_ids), format_log_context(context)
+        )
 
         if not bot_ids:
-            logger.warning("No bots subscribed - DISARM has no effect | %s", format_log_context(context))
+            logger.warning(
+                "No bots subscribed - DISARM has no effect | %s",
+                format_log_context(context),
+            )
             return cancelled
 
         total_matching = 0
@@ -314,14 +350,18 @@ class SignalProcessor:
 
             bot = await self._bots.get_bot(bot_id)
             if bot is None:
-                logger.warning("Bot not found in database | bot_id=%s | %s", bot_id, log_ctx)
+                logger.warning(
+                    "Bot not found in database | bot_id=%s | %s", bot_id, log_ctx
+                )
                 continue
 
             if not bot.enabled:
                 logger.info("Bot disabled, skipping | bot_id=%s | %s", bot_id, log_ctx)
                 continue
 
-            logger.debug("Fetching pending orders | bot_id=%s symbol=%s", bot_id, sig.symbol)
+            logger.debug(
+                "Fetching pending orders | bot_id=%s symbol=%s", bot_id, sig.symbol
+            )
             pendings = await self._orders.list_pending_order_states(
                 bot_id,
                 sig.symbol,
@@ -330,29 +370,44 @@ class SignalProcessor:
 
             logger.info(
                 "Found %d pending order(s) | bot_id=%s | %s",
-                len(pendings), bot_id, log_ctx,
+                len(pendings),
+                bot_id,
+                log_ctx,
             )
 
             for j, state in enumerate(pendings, 1):
                 logger.debug(
                     "Checking pending order %d/%d | bot_id=%s order_id=%s side=%s status=%s",
-                    j, len(pendings), bot_id, state.order_id or "N/A",
-                    state.side.value, state.status.value,
+                    j,
+                    len(pendings),
+                    bot_id,
+                    state.order_id or "N/A",
+                    state.side.value,
+                    state.status.value,
                 )
 
                 if state.side != sig.prev_side:
                     logger.debug(
                         "Order side mismatch | order_side=%s disarm_prev_side=%s - skipping",
-                        state.side.value, sig.prev_side.value,
+                        state.side.value,
+                        sig.prev_side.value,
                     )
                     continue
 
                 if state.status not in (OrderStatus.PENDING, OrderStatus.ARMED):
-                    logger.debug("Order not active | status=%s - skipping", state.status.value)
+                    logger.debug(
+                        "Order not active | status=%s - skipping", state.status.value
+                    )
                     continue
 
-                if not (state.order_id or state.stop_order_id or state.take_profit_order_id):
-                    logger.warning("Pending order has no exchange ids | bot_id=%s state_id=%s", bot_id, state.id)
+                if not (
+                    state.order_id or state.stop_order_id or state.take_profit_order_id
+                ):
+                    logger.warning(
+                        "Pending order has no exchange ids | bot_id=%s state_id=%s",
+                        bot_id,
+                        state.id,
+                    )
                     continue
 
                 trading = await self._trading_factory(bot)
@@ -376,7 +431,9 @@ class SignalProcessor:
                         log_ctx,
                     )
                     try:
-                        await trading.cancel_order(symbol=state.symbol, order_id=int(oid))
+                        await trading.cancel_order(
+                            symbol=state.symbol, order_id=int(oid)
+                        )
                         cancelled.append(str(oid))
                         cancelled_any = True
                         logger.info(
@@ -397,16 +454,27 @@ class SignalProcessor:
                         )
 
                 if cancelled_any:
-                    logger.debug("Marking order as CANCELLED | bot_id=%s state_id=%s", bot_id, state.id)
+                    logger.debug(
+                        "Marking order as CANCELLED | bot_id=%s state_id=%s",
+                        bot_id,
+                        state.id,
+                    )
                     state.mark(OrderStatus.CANCELLED)
                     await self._orders.save_state(state)
 
         logger.info(
             "DISARM complete | found=%d cancelled=%d msg_id=%s | %s",
-            total_matching, len(cancelled), message_id, format_log_context(context),
+            total_matching,
+            len(cancelled),
+            message_id,
+            format_log_context(context),
         )
 
         if cancelled:
-            logger.info("Cancelled order IDs: %s | %s", ", ".join(cancelled), format_log_context(context))
+            logger.info(
+                "Cancelled order IDs: %s | %s",
+                ", ".join(cancelled),
+                format_log_context(context),
+            )
 
         return cancelled

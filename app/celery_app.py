@@ -10,8 +10,11 @@ from kombu import Queue, Exchange
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("CELERY_LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(
+    level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 LOG = logging.getLogger("celery_app")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _env_int(name: str, default: int) -> int:
@@ -19,6 +22,7 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except Exception:
         return default
+
 
 # ── Celery app (named `celery`, not `app`) ────────────────────────────────────
 BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
@@ -43,7 +47,9 @@ celery.conf.task_routes = {
 celery.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
-    broker_transport_options={"visibility_timeout": _env_int("CELERY_VISIBILITY_TIMEOUT", 3600)},
+    broker_transport_options={
+        "visibility_timeout": _env_int("CELERY_VISIBILITY_TIMEOUT", 3600)
+    },
     result_expires=_env_int("CELERY_RESULT_EXPIRES", 3600),
     worker_prefetch_multiplier=_env_int("CELERY_PREFETCH", 1),
     worker_max_tasks_per_child=_env_int("CELERY_MAX_TASKS_PER_CHILD", 200),
@@ -54,6 +60,7 @@ celery.conf.update(
     enable_utc=True,
     task_default_queue="signals",
 )
+
 
 def _build_beat_schedule() -> Dict[str, Dict[str, Any]]:
     schedule: Dict[str, Dict[str, Any]] = {}
@@ -70,17 +77,25 @@ def _build_beat_schedule() -> Dict[str, Dict[str, Any]]:
         }
     return schedule
 
+
 celery.conf.beat_schedule = _build_beat_schedule()
 if celery.conf.beat_schedule:
-    LOG.info("Beat schedule enabled for symbols: %s", list(celery.conf.beat_schedule.keys()))
+    LOG.info(
+        "Beat schedule enabled for symbols: %s", list(celery.conf.beat_schedule.keys())
+    )
 else:
     LOG.info("Beat schedule is disabled (set RECONCILE_SYMBOLS to enable).")
 
 # Import tasks so Celery registers them
-import app.services.tasks.handlers   # noqa: E402,F401
-import app.services.tasks.periodic   # noqa: E402,F401
+import app.services.tasks.handlers  # noqa: E402,F401
+import app.services.tasks.periodic  # noqa: E402,F401
 
-LOG.info("Celery app initialized. Broker=%s Backend=%s TZ=%s", BROKER_URL, RESULT_BACKEND, TIMEZONE)
+LOG.info(
+    "Celery app initialized. Broker=%s Backend=%s TZ=%s",
+    BROKER_URL,
+    RESULT_BACKEND,
+    TIMEZONE,
+)
 
 # Export only the Celery instance for -A target
 __all__ = ["celery"]

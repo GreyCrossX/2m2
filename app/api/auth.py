@@ -13,6 +13,7 @@ from app.utils.auth import hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
+
 @router.post("/signup", response_model=Token, status_code=status.HTTP_201_CREATED)
 async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     # Normalize email for uniqueness
@@ -24,7 +25,7 @@ async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email is already registered."
+            detail="Email is already registered.",
         )
 
     # Hash password
@@ -46,7 +47,7 @@ async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email is already registered."
+            detail="Email is already registered.",
         )
     await db.refresh(new_user)
 

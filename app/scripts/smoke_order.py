@@ -1,4 +1,5 @@
 """Simple smoke test for placing/canceling Binance futures orders."""
+
 from __future__ import annotations
 
 import asyncio
@@ -18,13 +19,17 @@ async def main() -> None:
     qty = Decimal(os.getenv("SMOKE_QTY", "0.002"))
     price = Decimal(os.getenv("SMOKE_PRICE", "10000"))
 
-    client = BinanceClient(api_key=key, api_secret=secret, testnet=True, timeout_ms=30_000)
+    client = BinanceClient(
+        api_key=key, api_secret=secret, testnet=True, timeout_ms=30_000
+    )
     trading = BinanceTrading(client)
 
     q_qty, q_price = await trading.quantize_limit_order(symbol, qty, price)
     print(f"Quantized quantity={q_qty} price={q_price}")
 
-    order = await trading.create_limit_order(symbol, "BUY", q_qty, q_price, time_in_force="GTC")
+    order = await trading.create_limit_order(
+        symbol, "BUY", q_qty, q_price, time_in_force="GTC"
+    )
     order_id = order.get("orderId")
     print(f"Order placed: {order}")
 

@@ -8,7 +8,13 @@ from uuid import UUID, uuid4
 
 from app.services.worker.application.signal_processor import SignalProcessor
 from app.services.worker.domain.enums import OrderSide, OrderStatus, SideWhitelist
-from app.services.worker.domain.models import ArmSignal, BotConfig, DisarmSignal, OrderState, Position
+from app.services.worker.domain.models import (
+    ArmSignal,
+    BotConfig,
+    DisarmSignal,
+    OrderState,
+    Position,
+)
 
 
 class RouterStub:
@@ -63,7 +69,9 @@ class OrderExecutorStub:
 
     async def execute_order(self, bot: BotConfig, signal: ArmSignal) -> OrderState:
         self.executed = True
-        raise AssertionError("execute_order should not be called when active trades exist")
+        raise AssertionError(
+            "execute_order should not be called when active trades exist"
+        )
 
 
 class SuccessfulExecutorStub:
@@ -161,7 +169,13 @@ async def test_disarm_cancels_all_related_orders() -> None:
     async def trading_factory(_: BotConfig):
         return trading
 
-    processor = SignalProcessor(router, bots, order_executor=OrderExecutorStub(), order_gateway=orders, trading_factory=trading_factory)
+    processor = SignalProcessor(
+        router,
+        bots,
+        order_executor=OrderExecutorStub(),
+        order_gateway=orders,
+        trading_factory=trading_factory,
+    )
 
     disarm = _disarm_signal(OrderSide.LONG)
     cancelled = await processor.process_disarm_signal(disarm, "1-0")
@@ -244,14 +258,20 @@ async def test_disabled_bot_logs_and_skips(caplog: pytest.LogCaptureFixture) -> 
     async def trading_factory(_: BotConfig):
         return TradingStub()
 
-    processor = SignalProcessor(router, bots, SuccessfulExecutorStub(), orders, trading_factory)
+    processor = SignalProcessor(
+        router, bots, SuccessfulExecutorStub(), orders, trading_factory
+    )
 
     with caplog.at_level("INFO"):
-        results = await processor.process_arm_signal(_arm_signal(OrderSide.LONG), "msg-2")
+        results = await processor.process_arm_signal(
+            _arm_signal(OrderSide.LONG), "msg-2"
+        )
 
     assert not results
     assert not orders.saved
-    assert any(f"Skipping disabled bot {bot.id}" in message for message in caplog.messages)
+    assert any(
+        f"Skipping disabled bot {bot.id}" in message for message in caplog.messages
+    )
 
 
 @pytest.mark.asyncio

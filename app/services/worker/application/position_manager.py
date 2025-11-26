@@ -65,12 +65,18 @@ class PositionManager:
         if existing and allow_pyramiding and existing.side == order_state.side:
             total_qty = existing.quantity + qty
             if total_qty <= 0:
-                raise WorkerException("Pyramiding update resulted in non-positive quantity.")
-            weighted_entry = ((existing.entry_price * existing.quantity) + (entry * qty)) / total_qty
+                raise WorkerException(
+                    "Pyramiding update resulted in non-positive quantity."
+                )
+            weighted_entry = (
+                (existing.entry_price * existing.quantity) + (entry * qty)
+            ) / total_qty
             existing.entry_price = weighted_entry
             existing.quantity = total_qty
             existing.stop_loss = stop
-            existing.take_profit = self._compute_take_profit(order_state.side, weighted_entry, stop)
+            existing.take_profit = self._compute_take_profit(
+                order_state.side, weighted_entry, stop
+            )
             self._layers.setdefault(bot_id, []).append(layer)
             return existing
 

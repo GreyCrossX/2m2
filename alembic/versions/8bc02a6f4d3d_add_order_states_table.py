@@ -9,6 +9,7 @@ down_revision = "0b4a38b97487"
 branch_labels = None
 depends_on = None
 
+
 def upgrade():
     # -- Ensure enums exist (create if missing) -------------------------------
     op.execute("""
@@ -33,26 +34,41 @@ def upgrade():
     op.execute("ALTER TYPE order_status_enum ADD VALUE IF NOT EXISTS 'filled';")
     op.execute("ALTER TYPE order_status_enum ADD VALUE IF NOT EXISTS 'cancelled';")
     op.execute("ALTER TYPE order_status_enum ADD VALUE IF NOT EXISTS 'failed';")
-    op.execute("ALTER TYPE order_status_enum ADD VALUE IF NOT EXISTS 'skipped_low_balance';")
-    op.execute("ALTER TYPE order_status_enum ADD VALUE IF NOT EXISTS 'skipped_whitelist';")
+    op.execute(
+        "ALTER TYPE order_status_enum ADD VALUE IF NOT EXISTS 'skipped_low_balance';"
+    )
+    op.execute(
+        "ALTER TYPE order_status_enum ADD VALUE IF NOT EXISTS 'skipped_whitelist';"
+    )
 
     # -- Define enum types for column use WITHOUT creating them again ---------
     status_enum = postgresql.ENUM(
-        'armed', 'pending', 'filled', 'cancelled', 'failed',
-        'skipped_low_balance', 'skipped_whitelist',
-        name='order_status_enum',
+        "armed",
+        "pending",
+        "filled",
+        "cancelled",
+        "failed",
+        "skipped_low_balance",
+        "skipped_whitelist",
+        name="order_status_enum",
         create_type=False,
     )
     side_enum = postgresql.ENUM(
-        'long', 'short',
-        name='order_side_enum',
+        "long",
+        "short",
+        name="order_side_enum",
         create_type=False,
     )
 
     # -- Create table using existing enums -----------------------------------
     op.create_table(
         "order_states",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
         sa.Column("bot_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("signal_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("order_id", sa.String(length=64), nullable=True),
@@ -62,8 +78,18 @@ def upgrade():
         sa.Column("trigger_price", sa.Numeric(38, 18), nullable=True),
         sa.Column("stop_price", sa.Numeric(38, 18), nullable=True),
         sa.Column("quantity", sa.Numeric(38, 18), nullable=True),
-        sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("NOW()")),
-        sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("NOW()")),
+        sa.Column(
+            "created_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("NOW()"),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("NOW()"),
+        ),
         sa.UniqueConstraint("bot_id", "signal_id", name="uq_orderstate_bot_signal"),
         schema="public",
     )
@@ -83,10 +109,15 @@ def upgrade():
         schema="public",
     )
 
+
 def downgrade():
     # Drop table first
-    op.drop_index("ix_order_states_created_at", table_name="order_states", schema="public")
-    op.drop_index("ix_order_states_bot_sym_status", table_name="order_states", schema="public")
+    op.drop_index(
+        "ix_order_states_created_at", table_name="order_states", schema="public"
+    )
+    op.drop_index(
+        "ix_order_states_bot_sym_status", table_name="order_states", schema="public"
+    )
     op.drop_table("order_states", schema="public")
 
     # Only drop enums if nothing else uses them (safe-ish)

@@ -1,15 +1,21 @@
 from dataclasses import dataclass
 from typing import Optional
 
+
 @dataclass
 class OneMinute:
     ts: int
-    open: float; high: float; low: float; close: float
+    open: float
+    high: float
+    low: float
+    close: float
     volume: float
     trades: int
 
-def _is_even(ts_ms:int) -> bool:
-    return ((ts_ms//60000) % 60) % 2 == 0
+
+def _is_even(ts_ms: int) -> bool:
+    return ((ts_ms // 60000) % 60) % 2 == 0
+
 
 class TwoMinuteAggregator:
     def __init__(self, sym: str):
@@ -22,7 +28,8 @@ class TwoMinuteAggregator:
             return None
         if self.pending_even is None:
             return None
-        e = self.pending_even; o = c1
+        e = self.pending_even
+        o = c1
         two = {
             "v": "1",
             "ts": str(o.ts),
@@ -30,7 +37,7 @@ class TwoMinuteAggregator:
             "tf": "2m",
             "open": f"{e.open}",
             "high": f"{max(e.high, o.high)}",
-            "low":  f"{min(e.low,  o.low)}",
+            "low": f"{min(e.low, o.low)}",
             "close": f"{o.close}",
             "volume": f"{e.volume + o.volume}",
             "trades": f"{e.trades + o.trades}",

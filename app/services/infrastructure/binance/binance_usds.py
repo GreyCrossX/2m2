@@ -1,4 +1,5 @@
 """Synchronous Binance USDⓈ-M futures client with retries and normalization."""
+
 from __future__ import annotations
 
 import logging
@@ -19,7 +20,9 @@ try:  # pragma: no cover - defensive import
         DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL,
     )
 except Exception:  # pragma: no cover
-    DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL = "https://testnet.binancefuture.com"
+    DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL = (
+        "https://testnet.binancefuture.com"
+    )
 
 from app.services.domain.exceptions import (
     DomainAuthError,
@@ -208,7 +211,7 @@ class BinanceUSDS:
                 requests.exceptions.RequestException,
                 TimeoutError,
                 ConnectionError,
-            ) as exc:
+            ):
                 if attempt >= self._max_retries:
                     raise
                 delay = self._backoff_factor * (2**attempt)

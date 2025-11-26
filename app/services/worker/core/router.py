@@ -4,7 +4,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
-from ..domain.enums import OrderSide, SideWhitelist
+from ..domain.enums import OrderSide
 from ..domain.models import BotConfig
 
 

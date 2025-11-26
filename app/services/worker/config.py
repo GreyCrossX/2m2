@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import List
 
 
@@ -58,18 +57,26 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        syms = [s.strip().upper() for s in _env("WORKER_SYMBOLS", "BTCUSDT").split(",") if s.strip()]
+        syms = [
+            s.strip().upper()
+            for s in _env("WORKER_SYMBOLS", "BTCUSDT").split(",")
+            if s.strip()
+        ]
         return cls(
             service_name=_env("SERVICE_NAME", "worker"),
             log_level=_env("LOG_LEVEL", "INFO"),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
-            postgres_dsn=_env("POSTGRES_DSN", "postgresql+asyncpg://user:pass@localhost:5432/app"),
+            postgres_dsn=_env(
+                "POSTGRES_DSN", "postgresql+asyncpg://user:pass@localhost:5432/app"
+            ),
             symbols=syms,
             timeframe=_env("TIMEFRAME", "2m"),
             stream_block_ms=_env_int("STREAM_BLOCK_MS", 15000),
             catchup_threshold_ms=_env_int("CATCHUP_THRESHOLD_MS", 15000),
             router_refresh_seconds=_env_int("ROUTER_REFRESH_SECONDS", 60),
-            order_monitor_interval_seconds=_env_int("ORDER_MONITOR_INTERVAL_SECONDS", 3),
+            order_monitor_interval_seconds=_env_int(
+                "ORDER_MONITOR_INTERVAL_SECONDS", 3
+            ),
             balance_ttl_seconds=_env_int("BALANCE_TTL_SECONDS", 30),
             binance_connector=_env("BINANCE_CONNECTOR", "modular"),
             dry_run_mode=_env_bool("DRY_RUN_MODE", False),

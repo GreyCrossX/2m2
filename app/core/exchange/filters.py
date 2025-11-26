@@ -6,7 +6,9 @@ from typing import Any, Dict
 SymbolFilters = Dict[str, Dict[str, Any]]
 
 
-def build_symbol_filters(exchange_info: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def build_symbol_filters(
+    exchange_info: Dict[str, Any],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     symbols = exchange_info.get("symbols") or exchange_info.get("data") or []
@@ -40,6 +42,7 @@ def build_symbol_filters(exchange_info: Dict[str, Any]) -> Dict[str, Dict[str, D
 
 
 # ---------- helpers ----------
+
 
 def _ensure_decimal(value: Any) -> Decimal:
     if isinstance(value, Decimal):
@@ -82,6 +85,7 @@ def _step_from_precision(precision: Any) -> Decimal:
 
 # ---------- quantizers ----------
 
+
 def quantize_qty(symbol_filters: SymbolFilters, qty: Decimal) -> Decimal:
     quantity = _ensure_decimal(qty)
     if quantity <= 0:
@@ -95,7 +99,9 @@ def quantize_qty(symbol_filters: SymbolFilters, qty: Decimal) -> Decimal:
     if step <= 0:
         step = _ensure_positive_decimal(mlot.get("stepSize"))
     if step <= 0:
-        step = _step_from_precision(symbol_filters.get("META", {}).get("quantityPrecision"))
+        step = _step_from_precision(
+            symbol_filters.get("META", {}).get("quantityPrecision")
+        )
 
     # Floor to step (true multiple, not just decimal-place quantize)
     q = _floor_to_step(quantity, step) if step > 0 else quantity
@@ -112,7 +118,9 @@ def quantize_qty(symbol_filters: SymbolFilters, qty: Decimal) -> Decimal:
     return q if q >= 0 else Decimal("0")
 
 
-def quantize_price(symbol_filters: SymbolFilters, price: Decimal | None) -> Decimal | None:
+def quantize_price(
+    symbol_filters: SymbolFilters, price: Decimal | None
+) -> Decimal | None:
     if price is None:
         return None
     px = _ensure_decimal(price)
@@ -129,7 +137,9 @@ def quantize_price(symbol_filters: SymbolFilters, price: Decimal | None) -> Deci
         px = _floor_to_step(px, tick)
     else:
         # Fallback to precision if tickSize missing
-        tick = _step_from_precision(symbol_filters.get("META", {}).get("pricePrecision"))
+        tick = _step_from_precision(
+            symbol_filters.get("META", {}).get("pricePrecision")
+        )
         if tick > 0:
             px = _floor_to_step(px, tick)
 

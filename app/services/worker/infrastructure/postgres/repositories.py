@@ -24,6 +24,7 @@ _WHITELIST_MAP = {
     "both": SideWhitelist.BOTH,
 }
 
+
 def _map_side_whitelist(value: object) -> SideWhitelist:
     """
     Accepts DB value as Enum/str and returns SideWhitelist.
@@ -37,6 +38,7 @@ def _map_side_whitelist(value: object) -> SideWhitelist:
     except Exception:
         return SideWhitelist.BOTH
 
+
 def _to_bot_config(row: ORMBot) -> BotConfig:
     """
     Convert ORM Bot row -> Domain BotConfig.
@@ -49,15 +51,12 @@ def _to_bot_config(row: ORMBot) -> BotConfig:
         id=row.id,
         user_id=row.user_id,
         cred_id=row.cred_id,
-
         symbol=(row.symbol or "").upper(),
         timeframe=row.timeframe,
         enabled=bool(row.enabled),
         env=str(row.env),  # "testnet" | "prod"
-
         side_whitelist=_map_side_whitelist(row.side_whitelist),
         leverage=int(row.leverage),
-
         use_balance_pct=bool(row.use_balance_pct),
         balance_pct=Decimal(row.balance_pct or 0),
         fixed_notional=Decimal(row.fixed_notional or 0),
@@ -66,6 +65,7 @@ def _to_bot_config(row: ORMBot) -> BotConfig:
 
 
 # ---------- Repositories ----------
+
 
 class BotRepository:
     """Adapter that exposes BotConfig records using a session factory."""

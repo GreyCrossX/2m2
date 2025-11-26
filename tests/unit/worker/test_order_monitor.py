@@ -29,7 +29,9 @@ class OrderGatewayStub:
         self.states: List[OrderState] = list(states)
         self.saved: List[OrderState] = []
 
-    async def list_states_by_statuses(self, statuses: Iterable[OrderStatus]) -> List[OrderState]:
+    async def list_states_by_statuses(
+        self, statuses: Iterable[OrderStatus]
+    ) -> List[OrderState]:
         wanted = set(statuses)
         return [state for state in self.states if state.status in wanted]
 
@@ -80,7 +82,11 @@ class TradingStub:
             entry["status"] = "CANCELED"
 
     async def list_open_orders(self, symbol: str | None = None) -> List[Dict[str, str]]:
-        return [o for o in self.orders.values() if o.get("status") not in {"CANCELED", "FILLED"}]
+        return [
+            o
+            for o in self.orders.values()
+            if o.get("status") not in {"CANCELED", "FILLED"}
+        ]
 
 
 def _bot() -> BotConfig:
@@ -101,7 +107,9 @@ def _bot() -> BotConfig:
     )
 
 
-def _order_state(bot: BotConfig, status: OrderStatus, *, order_id: int = 1) -> OrderState:
+def _order_state(
+    bot: BotConfig, status: OrderStatus, *, order_id: int = 1
+) -> OrderState:
     return OrderState(
         bot_id=bot.id,
         signal_id="sig",

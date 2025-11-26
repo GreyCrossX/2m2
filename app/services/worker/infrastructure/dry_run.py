@@ -30,7 +30,9 @@ class DryRunTradingAdapter:
         self._orders: Dict[int, Dict[str, Any]] = {}
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
-        log.info("[dry-run] set_leverage noop | symbol=%s leverage=%s", symbol, leverage)
+        log.info(
+            "[dry-run] set_leverage noop | symbol=%s leverage=%s", symbol, leverage
+        )
 
     async def quantize_limit_order(
         self, symbol: str, quantity: Decimal, price: Decimal
@@ -64,7 +66,9 @@ class DryRunTradingAdapter:
             "newClientOrderId": new_client_order_id,
         }
         order_id = int(next(self._id_counter))
-        log.info("[dry-run] create_limit_order | order_id=%s payload=%s", order_id, payload)
+        log.info(
+            "[dry-run] create_limit_order | order_id=%s payload=%s", order_id, payload
+        )
         record = {
             "orderId": order_id,
             "dryRun": True,
@@ -127,7 +131,13 @@ class DryRunTradingAdapter:
             order["status"] = "CANCELED"
 
     async def get_order(self, symbol: str, order_id: int) -> Dict[str, Any]:
-        return self._orders.get(int(order_id), {"orderId": order_id, "status": "NEW", "executedQty": "0"})
+        return self._orders.get(
+            int(order_id), {"orderId": order_id, "status": "NEW", "executedQty": "0"}
+        )
 
     async def list_open_orders(self, symbol: str | None = None) -> list[dict]:
-        return [o for o in self._orders.values() if o.get("status") not in {"CANCELED", "FILLED"}]
+        return [
+            o
+            for o in self._orders.values()
+            if o.get("status") not in {"CANCELED", "FILLED"}
+        ]

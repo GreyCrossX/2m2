@@ -14,10 +14,12 @@ from ..domain.exceptions import (
     BinanceExchangeDownException,
     BinanceRateLimitException,
 )
+from ..infrastructure.metrics import WorkerMetrics
 
 log = logging.getLogger(__name__)
 
 # --------- Ports (to be implemented by Infra) ---------
+
 
 class BalanceValidatorPort(Protocol):
     async def validate_balance(
@@ -33,6 +35,7 @@ class BalanceValidatorPort(Protocol):
 
 class TradingPort(Protocol):
     """Subset of infrastructure/binance/trading.BinanceTrading we need."""
+
     async def set_leverage(self, symbol: str, leverage: int) -> None: ...
 
     async def quantize_limit_order(
@@ -45,7 +48,7 @@ class TradingPort(Protocol):
     async def create_limit_order(
         self,
         symbol: str,
-        side: OrderSide,        # domain enum (infra maps to BUY/SELL)
+        side: OrderSide,  # domain enum (infra maps to BUY/SELL)
         quantity: Decimal,
         price: Decimal,
         reduce_only: bool = False,
@@ -68,10 +71,10 @@ class TradingPort(Protocol):
     async def create_take_profit_limit(
         self,
         symbol: str,
-        side: OrderSide,        # opposite of entry
+        side: OrderSide,  # opposite of entry
         quantity: Decimal,
-        price: Decimal,         # limit price
-        stop_price: Decimal,    # TP trigger; for TP-LIMIT it's normally equal to price
+        price: Decimal,  # limit price
+        stop_price: Decimal,  # TP trigger; for TP-LIMIT it's normally equal to price
         reduce_only: bool = True,
         time_in_force: str = "GTC",
         new_client_order_id: Optional[str] = None,
@@ -85,6 +88,7 @@ class TradingPort(Protocol):
 
 class PositionManagerPort(Protocol):
     """Reserved for future fill/position notifications from WS."""
+
     ...
 
 
@@ -157,12 +161,14 @@ class OrderExecutor:
         *,
         tp_r_multiple: Decimal = Decimal("1.5"),
         trading_factory: Optional[Callable[[BotConfig], Awaitable[TradingPort]]] = None,
+        metrics: WorkerMetrics | None = None,
     ) -> None:
         self._bal = balance_validator
         self._bx = binance_client
         self._pm = position_manager
         self._tp_r = tp_r_multiple
         self.trading_factory = trading_factory  # may be set/overridden from main.py
+        self._metrics = metrics
 
     def _log_context(self, bot: BotConfig, signal: ArmSignal) -> dict[str, str]:
         return {
@@ -225,11 +231,15 @@ class OrderExecutor:
         if self._bx is not None:
             return self._bx
         if self.trading_factory is None:
-            raise RuntimeError("OrderExecutor.trading_factory not configured and no binance_client provided")
+            raise RuntimeError(
+                "OrderExecutor.trading_factory not configured and no binance_client provided"
+            )
         return await self.trading_factory(bot)
 
     # --- TP math ---
-    def _compute_tp_price(self, side: OrderSide, trigger: Decimal, stop: Decimal) -> Decimal:
+    def _compute_tp_price(
+        self, side: OrderSide, trigger: Decimal, stop: Decimal
+    ) -> Decimal:
         """
         TP distance = tp_r_multiple × |trigger - stop|.
         The absolute distance guards against malformed signals where the stop
@@ -252,10 +262,16 @@ class OrderExecutor:
         filters: dict | None = None,
     ) -> Decimal:
         f = filters or await trading.get_symbol_filters(symbol)
-        mn = (f.get("MIN_NOTIONAL") or f.get("NOTIONAL") or {})
-        mn_val = mn.get("notional") or mn.get("minNotional") or mn.get("minNotionalValue")
+        mn = f.get("MIN_NOTIONAL") or f.get("NOTIONAL") or {}
+        mn_val = (
+            mn.get("notional") or mn.get("minNotional") or mn.get("minNotionalValue")
+        )
         try:
-            return Decimal(str(mn_val)) if mn_val not in (None, "", "0") else NOTIONAL_FALLBACK
+            return (
+                Decimal(str(mn_val))
+                if mn_val not in (None, "", "0")
+                else NOTIONAL_FALLBACK
+            )
         except Exception:
             return NOTIONAL_FALLBACK
 
@@ -280,7 +296,11 @@ class OrderExecutor:
         meta = filters.get("META", {}) or {}
         qty_precision: int | None = None
         try:
-            qty_precision = int(meta.get("quantityPrecision")) if meta.get("quantityPrecision") is not None else None
+            qty_precision = (
+                int(meta.get("quantityPrecision"))
+                if meta.get("quantityPrecision") is not None
+                else None
+            )
         except (TypeError, ValueError):
             qty_precision = None
 
@@ -314,15 +334,26 @@ class OrderExecutor:
 
         required_margin = final_notional / lev
         if required_margin > balance_free:
-            return (False, q_qty, f"insufficient_margin_after_min_notional(required={required_margin}, free={balance_free})")
+            return (
+                False,
+                q_qty,
+                f"insufficient_margin_after_min_notional(required={required_margin}, free={balance_free})",
+            )
 
         if q_qty <= 0:
             return (False, q_qty, "qty_zero_after_round")
 
         log.debug(
             "[preflight] sym=%s raw_qty=%s q_qty=%s price=%s min_notional=%s notional=%s lev=%s req_margin=%s free=%s",
-            symbol, str(raw_qty), str(q_qty), str(price), str(min_notional),
-            str(q_qty * price), str(lev), str(required_margin), str(balance_free),
+            symbol,
+            str(raw_qty),
+            str(q_qty),
+            str(price),
+            str(min_notional),
+            str(q_qty * price),
+            str(lev),
+            str(required_margin),
+            str(balance_free),
         )
         return (True, q_qty, None)
 
@@ -397,7 +428,9 @@ class OrderExecutor:
             ctx_str,
         )
         if not is_ok:
-            return self._failure_state(bot, signal, status=OrderStatus.SKIPPED_LOW_BALANCE)
+            return self._failure_state(
+                bot, signal, status=OrderStatus.SKIPPED_LOW_BALANCE
+            )
 
         # --- 4) Get trading port, set leverage idempotently
         trading = await self._get_trading(bot)
@@ -429,11 +462,17 @@ class OrderExecutor:
                 reason_pf,
                 ctx_str,
             )
-            status = OrderStatus.SKIPPED_LOW_BALANCE if "insufficient_margin" in (reason_pf or "") else OrderStatus.FAILED
+            status = (
+                OrderStatus.SKIPPED_LOW_BALANCE
+                if "insufficient_margin" in (reason_pf or "")
+                else OrderStatus.FAILED
+            )
             return self._failure_state(bot, signal, status=status)
 
         # --- 6) Quantize ENTRY (exchange ticks), price may adjust; qty should still meet notional
-        q_qty, q_price = await trading.quantize_limit_order(signal.symbol, q_qty_pf, signal.trigger)
+        q_qty, q_price = await trading.quantize_limit_order(
+            signal.symbol, q_qty_pf, signal.trigger
+        )
         if q_qty <= 0 or q_price is None or q_price <= 0:
             log.error(
                 "Quantization invalid | sym=%s raw_qty=%s pf_qty=%s raw_price=%s -> q_qty=%s q_price=%s | %s",
@@ -459,13 +498,19 @@ class OrderExecutor:
                 str(avail_check),
                 ctx_str,
             )
-            return self._failure_state(bot, signal, status=OrderStatus.SKIPPED_LOW_BALANCE)
+            return self._failure_state(
+                bot, signal, status=OrderStatus.SKIPPED_LOW_BALANCE
+            )
 
         # --- 7) Quantize TP price separately
         tp_target = self._compute_tp_price(signal.side, signal.trigger, signal.stop)
-        _, q_tp_price = await trading.quantize_limit_order(signal.symbol, q_qty, tp_target)
+        _, q_tp_price = await trading.quantize_limit_order(
+            signal.symbol, q_qty, tp_target
+        )
         if q_tp_price is None or q_tp_price <= 0:
-            log.error("Quantized TP price invalid | sym=%s | %s", signal.symbol, ctx_str)
+            log.error(
+                "Quantized TP price invalid | sym=%s | %s", signal.symbol, ctx_str
+            )
             return self._failure_state(bot, signal)
 
         # --- 8) Place orders atomically
@@ -479,12 +524,24 @@ class OrderExecutor:
                 stop_price=signal.stop,
                 take_profit_price=q_tp_price,
             )
-        except (BinanceBadRequestException, BinanceRateLimitException, BinanceExchangeDownException) as exc:
+        except (
+            BinanceBadRequestException,
+            BinanceRateLimitException,
+            BinanceExchangeDownException,
+        ) as exc:
+            if self._metrics:
+                self._metrics.inc_binance_error(exc.__class__.__name__)
             log.warning("Order placement failed | %s reason=%s", ctx_str, exc)
-            return self._failure_state(bot, signal, quantity=q_qty, trigger_price=q_price)
+            return self._failure_state(
+                bot, signal, quantity=q_qty, trigger_price=q_price
+            )
         except BinanceAPIException as exc:
+            if self._metrics:
+                self._metrics.inc_binance_error(exc.__class__.__name__)
             log.error("Order placement failed | %s reason=%s", ctx_str, exc)
-            return self._failure_state(bot, signal, quantity=q_qty, trigger_price=q_price)
+            return self._failure_state(
+                bot, signal, quantity=q_qty, trigger_price=q_price
+            )
 
         log.info(
             "Order trio placed | qty=%s entry_price=%s stop=%s tp=%s entry_id=%s stop_id=%s tp_id=%s | %s",
@@ -538,14 +595,22 @@ class OrderExecutor:
         if bot.fixed_notional and bot.fixed_notional > 0:
             notional = bot.fixed_notional
         elif bot.use_balance_pct:
-            pct = bot.balance_pct if bot.balance_pct and bot.balance_pct > 0 else Decimal("0")
+            pct = (
+                bot.balance_pct
+                if bot.balance_pct and bot.balance_pct > 0
+                else Decimal("0")
+            )
             if pct > Decimal("1"):
                 pct = Decimal("1")
             notional = available_balance * pct
         else:
             return Decimal("0")
 
-        if bot.max_position_usdt and bot.max_position_usdt > 0 and notional > bot.max_position_usdt:
+        if (
+            bot.max_position_usdt
+            and bot.max_position_usdt > 0
+            and notional > bot.max_position_usdt
+        ):
             notional = bot.max_position_usdt
 
         qty = notional / entry_price

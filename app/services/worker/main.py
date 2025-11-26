@@ -45,7 +45,9 @@ async def _ping_redis(redis: Redis, *, retries: int = 60, delay: float = 1.0) ->
             pong = await redis.ping()
             log.info("Redis ping OK (attempt %d/%d): %s", attempt, retries, pong)
             return
-        except Exception as exc:  # pragma: no cover - connection issues are environment-specific
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - connection issues are environment-specific
             msg = str(exc)
             if "LOADING" in msg or "loading the dataset" in msg:
                 log.info("Redis loading AOF... waiting (%d/%d)", attempt, retries)
@@ -60,6 +62,19 @@ async def _ping_db(session: AsyncSession) -> None:
     log.info("Pinging Postgres (SELECT 1)...")
     await session.execute(text("SELECT 1"))
     log.info("Postgres ping OK")
+
+
+async def _heartbeat(
+    redis: Redis, service_name: str, interval: int = 10, ttl: int = 30
+) -> None:
+    """Periodic liveness heartbeat stored in Redis."""
+    key = f"health:worker:{service_name}"
+    while True:
+        try:
+            await redis.set(key, "alive", ex=ttl)
+        except Exception as exc:
+            log.warning("Heartbeat set failed | key=%s err=%s", key, exc)
+        await asyncio.sleep(interval)
 
 
 def _setup_signal_handlers(stop_event: asyncio.Event) -> None:
@@ -77,7 +92,9 @@ def _setup_signal_handlers(stop_event: asyncio.Event) -> None:
 
 async def main_async() -> None:
     if not os.getenv("CREDENTIALS_MASTER_KEY"):
-        raise RuntimeError("CREDENTIALS_MASTER_KEY is required to decrypt API credentials for the worker.")
+        raise RuntimeError(
+            "CREDENTIALS_MASTER_KEY is required to decrypt API credentials for the worker."
+        )
 
     cfg = Config.from_env()
     setup_logging(cfg.log_level)
@@ -97,7 +114,7 @@ async def main_async() -> None:
 
     log.info("Connecting to Redis...")
     redis = Redis.from_url(cfg.redis_url, decode_responses=False)
-    
+
     log.info("Creating Postgres session factory...")
     session_factory = create_session_factory(cfg.postgres_dsn)
 
@@ -140,8 +157,12 @@ async def main_async() -> None:
                 timeout_ms=30_000,
             )
             client_cache[key] = client
-            log.info("Binance client created and cached | cred_id=%s env=%s testnet=%s", 
-                    cred_id, env, env.lower() == "testnet")
+            log.info(
+                "Binance client created and cached | cred_id=%s env=%s testnet=%s",
+                cred_id,
+                env,
+                env.lower() == "testnet",
+            )
             return client
 
     log.info("Initializing application services...")
@@ -156,17 +177,24 @@ async def main_async() -> None:
 
     dry_run_adapter = DryRunTradingAdapter() if cfg.dry_run_mode else None
 
-    async def trading_factory(bot_cfg: BotConfig) -> BinanceTrading | DryRunTradingAdapter:
-        log.debug("Creating trading adapter | bot_id=%s symbol=%s", bot_cfg.id, bot_cfg.symbol)
+    async def trading_factory(
+        bot_cfg: BotConfig,
+    ) -> BinanceTrading | DryRunTradingAdapter:
+        log.debug(
+            "Creating trading adapter | bot_id=%s symbol=%s", bot_cfg.id, bot_cfg.symbol
+        )
         if cfg.dry_run_mode and dry_run_adapter is not None:
             return dry_run_adapter
         client = await get_binance_client(bot_cfg.cred_id, bot_cfg.env)
         return BinanceTrading(client)
 
+    metrics = WorkerMetrics()
+
     order_executor = OrderExecutor(
         balance_validator=balance_validator,
         position_manager=position_manager,
         trading_factory=trading_factory,
+        metrics=metrics,
     )
 
     order_monitor = BinanceOrderMonitor(
@@ -175,6 +203,7 @@ async def main_async() -> None:
         position_manager=position_manager,
         trading_factory=trading_factory,
         poll_interval=float(cfg.order_monitor_interval_seconds),
+        metrics=metrics,
     )
 
     signal_processor = SignalProcessor(
@@ -204,7 +233,9 @@ async def main_async() -> None:
 
     metrics = WorkerMetrics()
 
-    log.info("Creating worker poller (router refresh: %ds)...", cfg.router_refresh_seconds)
+    log.info(
+        "Creating worker poller (router refresh: %ds)...", cfg.router_refresh_seconds
+    )
     poller = WorkerPoller(
         config=cfg,
         stream_consumer=consumer,
@@ -224,6 +255,11 @@ async def main_async() -> None:
     await order_monitor.start()
     log.info("Order monitor started")
 
+    log.info("Starting heartbeat task...")
+    hb_task = asyncio.create_task(
+        _heartbeat(redis, cfg.service_name), name="worker.heartbeat"
+    )
+
     log.info("Starting worker poller task...")
     runner = asyncio.create_task(poller.start(), name="worker.poller")
     log.info("WorkerPoller task started - now listening for signals")
@@ -236,6 +272,10 @@ async def main_async() -> None:
         runner.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runner
+        log.info("Stopping heartbeat...")
+        hb_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await hb_task
         log.info("Stopping order monitor...")
         await order_monitor.stop()
         log.info("Closing Redis connection...")

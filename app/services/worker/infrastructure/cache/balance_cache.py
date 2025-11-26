@@ -11,6 +11,7 @@ class BalanceCache:
     In-memory async-friendly cache with TTL for account balances.
     Implements the async get/set the application port expects.
     """
+
     def __init__(self, ttl_seconds: int = 30):
         self._cache: Dict[Tuple[UUID, str], Tuple[Decimal, float]] = {}
         self._ttl = ttl_seconds

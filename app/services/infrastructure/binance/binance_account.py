@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 # === Utility Functions ===
 
+
 def _to_decimal_safe(value: Any, *, default: str = "0") -> Decimal:
     """
     Safely convert a value to Decimal.
@@ -31,7 +32,12 @@ def _to_decimal_safe(value: Any, *, default: str = "0") -> Decimal:
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError) as e:
-        logger.debug("Failed to parse Decimal from %r; using default=%s", value, default, exc_info=e)
+        logger.debug(
+            "Failed to parse Decimal from %r; using default=%s",
+            value,
+            default,
+            exc_info=e,
+        )
         return Decimal(default)
 
 
@@ -42,12 +48,15 @@ def _find_asset_balance(balances: list[dict], asset: str) -> Optional[dict]:
 
 # === Core Class ===
 
+
 class BinanceAccount:
     """
     High-level helper for Binance account operations (balance, margin, available funds).
     """
 
-    def __init__(self, client_provider: Callable[[UUID, str], Awaitable[BinanceClient]]):
+    def __init__(
+        self, client_provider: Callable[[UUID, str], Awaitable[BinanceClient]]
+    ):
         self._client_provider = client_provider
 
     async def _get_client(self, cred_id: UUID, env: str) -> BinanceClient:
@@ -92,14 +101,18 @@ class BinanceAccount:
 
         # Primary: Use account summary
         account_info = await client.account()
-        init_margin = account_info.get("totalInitialMargin") or account_info.get("total_initial_margin")
+        init_margin = account_info.get("totalInitialMargin") or account_info.get(
+            "total_initial_margin"
+        )
         if init_margin is not None:
             return _to_decimal_safe(init_margin)
 
         # Fallback: Aggregate from position risks
         return await self._calculate_used_margin_from_positions(client)
 
-    async def _calculate_used_margin_from_positions(self, client: BinanceClient) -> Decimal:
+    async def _calculate_used_margin_from_positions(
+        self, client: BinanceClient
+    ) -> Decimal:
         """Manually compute used margin from position information."""
         risks = await client.position_information()
         total_used = Decimal("0")
@@ -116,7 +129,9 @@ class BinanceAccount:
                 margin_used = notional / (leverage if leverage > 0 else Decimal("1"))
                 total_used += margin_used
             except Exception as e:
-                logger.debug("Malformed position risk row skipped: %r", risk, exc_info=e)
+                logger.debug(
+                    "Malformed position risk row skipped: %r", risk, exc_info=e
+                )
 
         return total_used
 
@@ -162,7 +177,9 @@ class BinanceAccount:
                     avail = _to_decimal_safe(raw)
                     return avail if avail > 0 else Decimal("0")
         except Exception as e:
-            logger.debug("Failed to get USDT availableBalance from balance()", exc_info=e)
+            logger.debug(
+                "Failed to get USDT availableBalance from balance()", exc_info=e
+            )
 
         # 3. Fallback: free - used
         try:
@@ -171,5 +188,7 @@ class BinanceAccount:
             available = free - used
             return available if available > 0 else Decimal("0")
         except Exception as e:
-            logger.warning("All methods failed to compute available balance", exc_info=e)
+            logger.warning(
+                "All methods failed to compute available balance", exc_info=e
+            )
             return Decimal("0")

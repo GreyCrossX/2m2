@@ -1,18 +1,16 @@
 """first commit
 
 Revision ID: aa1fd6432ac8
-Revises: 
+Revises:
 Create Date: 2025-09-01 13:01:40.356731
 
 """
-from typing import Sequence, Union
 
-from alembic import op
-import sqlalchemy as sa
+from typing import Sequence, Union
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'aa1fd6432ac8'
+revision: str = "aa1fd6432ac8"
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

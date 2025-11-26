@@ -6,6 +6,7 @@ from ..models import Candle
 
 logger = logging.getLogger(__name__)
 
+
 class IndicatorTracker:
     """Tracks recent candle colors (for optional heuristics or diagnostics)."""
 
@@ -17,8 +18,13 @@ class IndicatorTracker:
     def on_candle(self, c: Candle) -> None:
         self.colors.append(c.color)
         streak = self.streak()
-        logger.debug("Candle color tracked | ts=%d color=%s streak=%d total_tracked=%d", 
-                    c.ts, c.color, streak, len(self.colors))
+        logger.debug(
+            "Candle color tracked | ts=%d color=%s streak=%d total_tracked=%d",
+            c.ts,
+            c.color,
+            streak,
+            len(self.colors),
+        )
 
     def streak(self) -> int:
         if not self.colors:
@@ -29,8 +35,8 @@ class IndicatorTracker:
         while i >= 0 and self.colors[i] == last:
             s += 1
             i -= 1
-        
+
         if s >= 3:
             logger.debug("Notable streak detected | color=%s length=%d", last, s)
-        
+
         return s

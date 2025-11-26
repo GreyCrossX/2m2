@@ -2,8 +2,8 @@
 Data models for the calc service.
 All data transfer objects and domain models.
 """
+
 from dataclasses import dataclass
-from enum import Enum
 from decimal import Decimal
 from typing import Optional, Literal, Dict, Any
 import logging
@@ -14,9 +14,11 @@ Color = Literal["green", "red"]
 Regime = Literal["long", "short", "neutral"]
 SignalType = Literal["arm", "disarm"]
 
+
 @dataclass(frozen=True)
 class Candle:
     """Market candle data."""
+
     ts: int
     sym: str
     tf: str
@@ -27,7 +29,7 @@ class Candle:
     volume: Decimal
     trades: int
     color: Color
-    
+
     @staticmethod
     def from_msg(msg: Dict[str, Any]) -> "Candle":
         """Parse candle from Redis stream message."""
@@ -42,9 +44,16 @@ class Candle:
                 close=Decimal(str(msg["close"])),
                 volume=Decimal(str(msg.get("volume", "0"))),
                 trades=int(msg.get("trades", 0)),
-                color=("green" if str(msg.get("color", "")).lower() == "green" else "red"),
+                color=(
+                    "green" if str(msg.get("color", "")).lower() == "green" else "red"
+                ),
             )
-            logger.debug("Candle parsed | ts=%d sym=%s close=%s", candle.ts, candle.sym, candle.close)
+            logger.debug(
+                "Candle parsed | ts=%d sym=%s close=%s",
+                candle.ts,
+                candle.sym,
+                candle.close,
+            )
             return candle
         except (KeyError, ValueError, TypeError) as e:
             logger.error("Failed to parse candle | error=%s msg=%s", e, msg)
@@ -54,6 +63,7 @@ class Candle:
 @dataclass(frozen=True)
 class IndicatorState:
     """Simplified candle for indicator tracking."""
+
     v: str
     sym: str
     tf: str
@@ -73,7 +83,7 @@ class IndicatorState:
     def to_stream_map(self) -> Dict[str, str]:
         def _fmt(x):
             return f"{x}" if x is not None else ""
-        
+
         result = {
             "v": self.v,
             "sym": self.sym,
@@ -91,7 +101,9 @@ class IndicatorState:
             "ind_high": _fmt(self.ind_high),
             "ind_low": _fmt(self.ind_low),
         }
-        logger.debug("IndicatorState serialized | ts=%d regime=%s", self.ts, self.regime)
+        logger.debug(
+            "IndicatorState serialized | ts=%d regime=%s", self.ts, self.regime
+        )
         return result
 
 
@@ -123,10 +135,15 @@ class ArmSignal:
             "trigger": f"{self.trigger}",
             "stop": f"{self.stop}",
         }
-        logger.debug("ArmSignal serialized | side=%s trigger=%s stop=%s", 
-                    self.side, self.trigger, self.stop)
+        logger.debug(
+            "ArmSignal serialized | side=%s trigger=%s stop=%s",
+            self.side,
+            self.trigger,
+            self.stop,
+        )
         return result
-    
+
+
 @dataclass(frozen=True)
 class DisarmSignal:
     v: str
@@ -147,6 +164,9 @@ class DisarmSignal:
             "ts": str(self.ts),
             "reason": self.reason,
         }
-        logger.debug("DisarmSignal serialized | prev_side=%s reason=%s", 
-                    self.prev_side, self.reason)
+        logger.debug(
+            "DisarmSignal serialized | prev_side=%s reason=%s",
+            self.prev_side,
+            self.reason,
+        )
         return result

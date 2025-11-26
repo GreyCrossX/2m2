@@ -32,6 +32,7 @@ getcontext().prec = 28
 
 # ------------- CLI -------------
 
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Debug sizing and balance using bot credentials (USDT-M Futures)."
@@ -39,14 +40,24 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--bot", required=True, help="Bot UUID")
     p.add_argument("--trigger", required=True, type=Decimal, help="Entry/limit price")
     p.add_argument("--stop", required=True, type=Decimal, help="Protective stop price")
-    p.add_argument("--side", required=True, choices=["long", "short"], help="Order side")
+    p.add_argument(
+        "--side", required=True, choices=["long", "short"], help="Order side"
+    )
     p.add_argument("--timeframe", default="2m", help="Timeframe (for signal)")
-    p.add_argument("--quantize", action="store_true", help="Quantize qty/price using exchange filters")
-    p.add_argument("--place", action="store_true", help="Place the limit order (otherwise dry-run)")
+    p.add_argument(
+        "--quantize",
+        action="store_true",
+        help="Quantize qty/price using exchange filters",
+    )
+    p.add_argument(
+        "--place", action="store_true", help="Place the limit order (otherwise dry-run)"
+    )
     p.add_argument("--client-id", default=None, help="Optional newClientOrderId")
     return p.parse_args()
 
+
 # ------------- DB session factory -------------
+
 
 def _get_database_url() -> str:
     # Try typical env vars used by the app
@@ -56,6 +67,7 @@ def _get_database_url() -> str:
             return v
     raise SystemExit("Missing DATABASE_URL/POSTGRES_DSN env")
 
+
 def _make_session_factory() -> async_sessionmaker[AsyncSession]:
     url = _get_database_url()
     if url.startswith("postgresql://"):
@@ -64,7 +76,9 @@ def _make_session_factory() -> async_sessionmaker[AsyncSession]:
     engine = create_async_engine(url, future=True, pool_pre_ping=True)
     return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
+
 # ------------- Enum helpers -------------
+
 
 def _map_side_whitelist(value: str | SideWhitelist) -> SideWhitelist:
     if isinstance(value, SideWhitelist):
@@ -76,11 +90,14 @@ def _map_side_whitelist(value: str | SideWhitelist) -> SideWhitelist:
         return SideWhitelist.SHORT
     return SideWhitelist.BOTH
 
+
 def _parse_order_side(s: str) -> OrderSide:
     s = s.lower()
     return OrderSide.LONG if s == "long" else OrderSide.SHORT
 
+
 # ------------- Map ORM -> Domain -------------
+
 
 def _to_bot_config(row: ORMBot) -> BotConfig:
     return BotConfig(
@@ -99,6 +116,7 @@ def _to_bot_config(row: ORMBot) -> BotConfig:
         max_position_usdt=Decimal(row.max_position_usdt or 0),
     )
 
+
 async def fetch_bot_and_creds(
     session: AsyncSession, bot_id: str
 ) -> Tuple[BotConfig, str, str]:
@@ -115,10 +133,13 @@ async def fetch_bot_and_creds(
     api_key, api_secret = cred_row.get_decrypted()
     return _to_bot_config(bot_row), api_key, api_secret
 
+
 # ------------- Minimal Binance HTTP client (signed) -------------
+
 
 def _ts_ms() -> int:
     return int(time.time() * 1000)
+
 
 @dataclass
 class HttpBinance:
@@ -127,7 +148,11 @@ class HttpBinance:
     env: str  # "testnet" | "prod"
 
     def _um_base(self) -> str:
-        return "https://testnet.binancefuture.com" if self.env == "testnet" else "https://fapi.binance.com"
+        return (
+            "https://testnet.binancefuture.com"
+            if self.env == "testnet"
+            else "https://fapi.binance.com"
+        )
 
     def _sign(self, params: Dict[str, Any]) -> str:
         q = urllib.parse.urlencode(params, doseq=True)
@@ -135,14 +160,23 @@ class HttpBinance:
         return f"{q}&signature={sig}"
 
     def _request(
-        self, method: str, base: str, path: str, *, signed=False, params=None, timeout=20
+        self,
+        method: str,
+        base: str,
+        path: str,
+        *,
+        signed=False,
+        params=None,
+        timeout=20,
     ) -> Any:
         params = params or {}
         headers = {"X-MBX-APIKEY": self.api_key} if self.api_key else {}
         url = f"{base}{path}"
 
         if signed:
-            params.setdefault("recvWindow", int(os.getenv("BINANCE_RECV_WINDOW", "5000")))
+            params.setdefault(
+                "recvWindow", int(os.getenv("BINANCE_RECV_WINDOW", "5000"))
+            )
             params.setdefault("timestamp", _ts_ms())
             body = self._sign(params)
         else:
@@ -155,7 +189,9 @@ class HttpBinance:
         else:
             data = body.encode()
 
-        req = urllib.request.Request(url, data=data, method=method.upper(), headers=headers)
+        req = urllib.request.Request(
+            url, data=data, method=method.upper(), headers=headers
+        )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             txt = resp.read().decode("utf-8", errors="replace")
             try:
@@ -168,18 +204,34 @@ class HttpBinance:
         return self._request("GET", self._um_base(), "/fapi/v2/account", signed=True)
 
     def um_exchange_info(self, symbol: str) -> Dict[str, Any]:
-        return self._request("GET", self._um_base(), "/fapi/v1/exchangeInfo", signed=False, params={"symbol": symbol.upper()})
+        return self._request(
+            "GET",
+            self._um_base(),
+            "/fapi/v1/exchangeInfo",
+            signed=False,
+            params={"symbol": symbol.upper()},
+        )
 
     def um_new_order(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._request("POST", self._um_base(), "/fapi/v1/order", signed=True, params=payload)
+        return self._request(
+            "POST", self._um_base(), "/fapi/v1/order", signed=True, params=payload
+        )
 
     def um_change_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
-        return self._request("POST", self._um_base(), "/fapi/v1/leverage", signed=True, params={
-            "symbol": symbol.upper(),
-            "leverage": int(leverage),
-        })
+        return self._request(
+            "POST",
+            self._um_base(),
+            "/fapi/v1/leverage",
+            signed=True,
+            params={
+                "symbol": symbol.upper(),
+                "leverage": int(leverage),
+            },
+        )
+
 
 # ------------- BalanceValidator Port impl -------------
+
 
 class ScriptBalanceCache:
     def __init__(self):
@@ -190,6 +242,7 @@ class ScriptBalanceCache:
 
     async def set(self, cred_id, env, value: Decimal) -> None:
         self._store[(str(cred_id), env)] = value
+
 
 class ScriptBinanceAccount:
     def __init__(self, http: HttpBinance):
@@ -204,7 +257,9 @@ class ScriptBinanceAccount:
         except Exception:
             return Decimal("0")
 
+
 # ------------- TradingPort impl (quantize + optional order place) -------------
+
 
 def _decimal_quantize_step(value: Decimal, step: Decimal) -> Decimal:
     if step <= 0:
@@ -212,6 +267,7 @@ def _decimal_quantize_step(value: Decimal, step: Decimal) -> Decimal:
     # floor to step
     q = (value / step).to_integral_value(rounding=ROUND_DOWN)
     return (q * step).quantize(step)
+
 
 class ScriptTradingPort:
     """
@@ -221,6 +277,7 @@ class ScriptTradingPort:
       - create_limit_order (dry-run by default)
     Quantization is done via /fapi/v1/exchangeInfo.
     """
+
     def __init__(self, http: HttpBinance, *, place: bool, client_id: Optional[str]):
         self._http = http
         self._place = place
@@ -241,7 +298,7 @@ class ScriptTradingPort:
         if not syms:
             return Decimal("0"), None
         fdict = {}
-        for f in (syms[0].get("filters") or []):
+        for f in syms[0].get("filters") or []:
             fdict[f.get("filterType")] = f
 
         step_size = Decimal(str((fdict.get("LOT_SIZE") or {}).get("stepSize", "0")))
@@ -294,7 +351,9 @@ class ScriptTradingPort:
 
         return self._http.um_new_order(payload)
 
+
 # ------------- lightweight BalanceValidator wrapper (matches your class) -------------
+
 
 @dataclass
 class ScriptBalanceValidator:
@@ -325,7 +384,9 @@ class ScriptBalanceValidator:
         await self.balance_cache.set(cred_id, env, val)
         return val
 
+
 # ------------- Main -------------
+
 
 async def main() -> None:
     args = _parse_args()
@@ -363,10 +424,10 @@ async def main() -> None:
         symbol=bot.symbol,
         timeframe=args.timeframe,
         ts_ms=now_ms,
-        ts=None,             # optional fields in your model may accept None
+        ts=None,  # optional fields in your model may accept None
         ind_ts_ms=now_ms,
         ind_ts=None,
-        ind_high=trigger,    # just fill with something reasonable
+        ind_high=trigger,  # just fill with something reasonable
         ind_low=stop,
         trigger=trigger,
         stop=stop,
@@ -374,11 +435,15 @@ async def main() -> None:
 
     # Debug print header
     print("=== Debug Sizing ===")
-    print(f"Bot                 : {bot.id}  ({bot.symbol} {bot.timeframe})  env={bot.env}")
+    print(
+        f"Bot                 : {bot.id}  ({bot.symbol} {bot.timeframe})  env={bot.env}"
+    )
     print(f"API Key (last 8)    : ...{api_key[-8:] if len(api_key) >= 8 else api_key}")
     print(f"Whitelist           : {bot.side_whitelist}")
     print(f"Leverage            : {bot.leverage}x")
-    print(f"Config sizing       : use_balance_pct={bot.use_balance_pct}  balance_pct={bot.balance_pct}  fixed_notional={bot.fixed_notional}  max_position_usdt={bot.max_position_usdt}")
+    print(
+        f"Config sizing       : use_balance_pct={bot.use_balance_pct}  balance_pct={bot.balance_pct}  fixed_notional={bot.fixed_notional}  max_position_usdt={bot.max_position_usdt}"
+    )
     print(f"Signal              : side={side} trigger={trigger} stop={stop}")
 
     # Raw available balance (directly from UM Futures)
@@ -387,7 +452,9 @@ async def main() -> None:
 
     # Replicate OrderExecutor sizing path (before calling execute_order)
     # Use the same private logic to preview qty. We'll call execute_order anyway to ensure parity.
-    def _calc_qty(b: BotConfig, available_balance: Decimal, entry_price: Decimal) -> Decimal:
+    def _calc_qty(
+        b: BotConfig, available_balance: Decimal, entry_price: Decimal
+    ) -> Decimal:
         notional = Decimal("0")
         if b.fixed_notional and b.fixed_notional > 0:
             notional = b.fixed_notional
@@ -396,7 +463,11 @@ async def main() -> None:
             notional = available_balance * pct
         else:
             return Decimal("0")
-        if b.max_position_usdt and b.max_position_usdt > 0 and notional > b.max_position_usdt:
+        if (
+            b.max_position_usdt
+            and b.max_position_usdt > 0
+            and notional > b.max_position_usdt
+        ):
             notional = b.max_position_usdt
         if entry_price <= 0:
             return Decimal("0")
@@ -406,7 +477,9 @@ async def main() -> None:
     pre_qty = _calc_qty(bot, available, trigger)
     exposure = pre_qty * trigger
     required_margin = exposure / Decimal(bot.leverage if bot.leverage > 0 else 1)
-    ok, _ = await validator.validate_balance(bot, required_margin, available_balance=available)
+    ok, _ = await validator.validate_balance(
+        bot, required_margin, available_balance=available
+    )
 
     print(f"Pre-quant qty       : {pre_qty}")
     print(f"Exposure (qty*px)   : {exposure}")
@@ -414,12 +487,16 @@ async def main() -> None:
     print(f"Balance check       : {'OK' if ok else 'SKIP (low balance)'}")
 
     if pre_qty <= 0 or not ok:
-        print("\nSizing yields 0 or balance insufficient. Skipping order placement path.")
+        print(
+            "\nSizing yields 0 or balance insufficient. Skipping order placement path."
+        )
         return
 
     # Optionally quantize before running the executor
     if quantize:
-        q_qty, q_price = await trading.quantize_limit_order(bot.symbol, pre_qty, trigger)
+        q_qty, q_price = await trading.quantize_limit_order(
+            bot.symbol, pre_qty, trigger
+        )
         print(f"Quantized qty/price : {q_qty} @ {q_price}")
     else:
         q_qty, q_price = pre_qty, trigger
@@ -435,12 +512,16 @@ async def main() -> None:
     print(f"stop         : {state.stop_price}")
 
     if status == OrderStatus.FAILED:
-        print("\nResult: FAILED (likely quantization invalid or zero qty after constraints).")
+        print(
+            "\nResult: FAILED (likely quantization invalid or zero qty after constraints)."
+        )
     elif status == OrderStatus.SKIPPED_LOW_BALANCE:
         print("\nResult: SKIPPED_LOW_BALANCE")
     else:
         if state.order_id == 0:
-            print("\nNote: dry-run only (no real order created). Use --place to actually send the order.")
+            print(
+                "\nNote: dry-run only (no real order created). Use --place to actually send the order."
+            )
         elif state.order_id is None:
             print("\nNote: create_limit_order returned no orderId. (Adapter dry-run?)")
         else:

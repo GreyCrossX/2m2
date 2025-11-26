@@ -8,7 +8,10 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db.session import get_db
 from app.db.models.credentials import ApiCredential
-from app.db.schemas.credentials import ApiCredentialCreate, ApiCredentialOut  # your schema module path
+from app.db.schemas.credentials import (
+    ApiCredentialCreate,
+    ApiCredentialOut,
+)  # your schema module path
 from app.utils.jwt import get_current_user  # must return the ORM User
 from app.db.models.user import User
 
@@ -20,8 +23,7 @@ STRICT_LEN = 64  # enforce exactly 64 chars
 def _validate_len_64(k: str, field: str) -> None:
     if len(k or "") != STRICT_LEN:
         raise HTTPException(
-            status_code=422,
-            detail=f"{field} must be exactly {STRICT_LEN} characters."
+            status_code=422, detail=f"{field} must be exactly {STRICT_LEN} characters."
         )
 
 
@@ -48,7 +50,9 @@ async def create_credential(
     except IntegrityError:
         await db.rollback()
         # unique (user_id, env, label)
-        raise HTTPException(status_code=400, detail="Credential with this env/label already exists.")
+        raise HTTPException(
+            status_code=400, detail="Credential with this env/label already exists."
+        )
     await db.refresh(cred)
 
     # Return metadata only (no secrets)
@@ -64,7 +68,11 @@ async def list_credentials(
     stmt = select(ApiCredential).where(ApiCredential.user_id == me.id)
     if env:
         stmt = stmt.where(ApiCredential.env == env)
-    rows = (await db.execute(stmt.order_by(ApiCredential.created_at.desc()))).scalars().all()
+    rows = (
+        (await db.execute(stmt.order_by(ApiCredential.created_at.desc())))
+        .scalars()
+        .all()
+    )
     # Metadata only; secrets never leave server
     return [ApiCredentialOut.model_validate(c) for c in rows]
 
@@ -75,7 +83,9 @@ async def delete_credential(
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    stmt = select(ApiCredential).where(ApiCredential.id == cred_id, ApiCredential.user_id == me.id)
+    stmt = select(ApiCredential).where(
+        ApiCredential.id == cred_id, ApiCredential.user_id == me.id
+    )
     cred = (await db.execute(stmt)).scalar_one_or_none()
     if not cred:
         return  # 204 on no-op delete

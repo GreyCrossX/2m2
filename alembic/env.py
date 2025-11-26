@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 # Load .env first, so env vars are available before we read config
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     # dotenv is optional; ignore if not installed
@@ -41,7 +42,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # app/db/base.py must define ONE Declarative Base and import all models.
 from app.db.base import Base  # noqa: E402
 
-import app.db.models
 
 # Expose metadata for autogenerate
 target_metadata = Base.metadata
@@ -70,9 +70,9 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        compare_type=True,             # detect column type changes
-        compare_server_default=True,   # detect server_default changes
-        include_schemas=True,          # if you use multiple schemas
+        compare_type=True,  # detect column type changes
+        compare_server_default=True,  # detect server_default changes
+        include_schemas=True,  # if you use multiple schemas
     )
 
     with context.begin_transaction():
@@ -102,7 +102,7 @@ async def run_migrations_online_async() -> None:
     """
     connectable = create_async_engine(
         db_url,
-        poolclass=pool.NullPool,   # avoid connection pooling in migrations
+        poolclass=pool.NullPool,  # avoid connection pooling in migrations
         future=True,
     )
 

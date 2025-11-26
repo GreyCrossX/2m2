@@ -12,6 +12,7 @@ ENV_FILE = PROJECT_ROOT / ".env"
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv(ENV_FILE)  # load the root .env explicitly
 except Exception:
     pass
@@ -21,12 +22,13 @@ _PLACEHOLDER_PAT = re.compile(
     r"//\s*(username|user|usr)\s*:\s*(password|pass|pwd)@", re.IGNORECASE
 )
 
+
 def _normalize_to_asyncpg(dsn: str) -> str:
     """Normalize to postgresql+asyncpg:// ..."""
     if dsn.startswith("postgres://"):
-        dsn = "postgresql://" + dsn[len("postgres://"):]
+        dsn = "postgresql://" + dsn[len("postgres://") :]
     if dsn.startswith("postgresql://") and "+asyncpg" not in dsn:
-        dsn = "postgresql+asyncpg://" + dsn[len("postgresql://"):]
+        dsn = "postgresql+asyncpg://" + dsn[len("postgresql://") :]
     return dsn
 
 
@@ -45,7 +47,9 @@ class Settings(BaseSettings):
     # Secrets
     SECRET_KEY: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("SECRET_KEY", "secret_key", "jwt_secret", "super_secret_key"),
+        validation_alias=AliasChoices(
+            "SECRET_KEY", "secret_key", "jwt_secret", "super_secret_key"
+        ),
     )
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
@@ -58,8 +62,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    #redis
-    REDIS_URL : str | None = None
+    # redis
+    REDIS_URL: str | None = None
     PAIRS_1M: str = "BTCUSDT:1m,ETHUSDT:1m"
 
     def pairs_1m_list(self) -> List[Tuple[str, str]]:

@@ -1,4 +1,5 @@
 """High-level trading helpers built on top of :class:`BinanceClient`."""
+
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_DOWN
@@ -24,6 +25,7 @@ _VALID_WORKING_TYPES = {"CONTRACT_PRICE", "MARK_PRICE"}
 
 
 # ---- Utilities ---------------------------------------------------------------
+
 
 def _normalize_side(side: OrderSide | str) -> str:
     """Map domain side to exchange side string."""
@@ -100,6 +102,7 @@ def _final_qty_clamp(filters: Dict[str, Dict[str, Any]], q_qty: Decimal) -> Deci
 
 # ---- Trading Facade ----------------------------------------------------------
 
+
 class BinanceTrading:
     """
     Trading facade that performs validation and quantization before submitting orders.
@@ -128,7 +131,9 @@ class BinanceTrading:
             return self._filters_cache[sym]
 
         info = await self._client.exchange_info()
-        entry = next((s for s in info.get("symbols", []) if s.get("symbol") == sym), None)
+        entry = next(
+            (s for s in info.get("symbols", []) if s.get("symbol") == sym), None
+        )
         filters: dict[str, dict] = {}
         if entry:
             for f in entry.get("filters", []):
@@ -153,7 +158,9 @@ class BinanceTrading:
                     }
                 elif t in ("NOTIONAL", "MIN_NOTIONAL"):
                     filters[t] = {
-                        "notional": f.get("notional") or f.get("minNotional") or f.get("minNotionalValue")
+                        "notional": f.get("notional")
+                        or f.get("minNotional")
+                        or f.get("minNotionalValue")
                     }
 
         # safe defaults
@@ -176,7 +183,9 @@ class BinanceTrading:
 
     async def _quantize_price_only(self, symbol: str, price: Decimal) -> Decimal:
         """Quantize price using quantize_order; ignores qty output."""
-        _, q_price = await self._client.quantize_order(symbol.upper(), Decimal("1"), price)
+        _, q_price = await self._client.quantize_order(
+            symbol.upper(), Decimal("1"), price
+        )
         if q_price is None or q_price <= 0:
             raise DomainBadRequest("Quantized price invalid")
         return q_price
@@ -200,7 +209,9 @@ class BinanceTrading:
         side_str = _normalize_side(side)
         tif = _validate_choice(time_in_force, _VALID_TIME_IN_FORCE, "time_in_force")
         if position_side:
-            position_side = _validate_choice(position_side, _VALID_POSITION_SIDES, "position_side")
+            position_side = _validate_choice(
+                position_side, _VALID_POSITION_SIDES, "position_side"
+            )
 
         filters = await self.get_symbol_filters(sym)
 
@@ -215,12 +226,16 @@ class BinanceTrading:
             raise DomainBadRequest("Quantity below minimum after final clamp")
 
         # Min notional check
-        mn = (filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL") or {})
+        mn = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL") or {}
         mn_val = mn.get("notional") or "0"
-        min_notional = Decimal(str(mn_val)) if mn_val not in (None, "") else Decimal("0")
+        min_notional = (
+            Decimal(str(mn_val)) if mn_val not in (None, "") else Decimal("0")
+        )
         notional = q_qty * q_price
         if min_notional > 0 and notional < min_notional:
-            raise DomainBadRequest(f"Notional {notional} below minimum {min_notional} for {sym}")
+            raise DomainBadRequest(
+                f"Notional {notional} below minimum {min_notional} for {sym}"
+            )
 
         payload: Dict[str, Any] = {
             "symbol": sym,
@@ -259,7 +274,9 @@ class BinanceTrading:
         sym = symbol.upper()
         side_str = _normalize_side(side)
         if position_side:
-            position_side = _validate_choice(position_side, _VALID_POSITION_SIDES, "position_side")
+            position_side = _validate_choice(
+                position_side, _VALID_POSITION_SIDES, "position_side"
+            )
 
         filters = await self.get_symbol_filters(sym)
         q_qty, _ = await self._client.quantize_order(sym, quantity, Decimal("1"))
@@ -296,7 +313,7 @@ class BinanceTrading:
         quantity: Decimal,
         stop_price: Decimal,
         *,
-        working_type: str | None = None,   # CONTRACT_PRICE / MARK_PRICE
+        working_type: str | None = None,  # CONTRACT_PRICE / MARK_PRICE
         position_side: str = "BOTH",
         order_type: str = "STOP_MARKET",
         reduce_only: bool = True,
@@ -307,17 +324,25 @@ class BinanceTrading:
         sym = symbol.upper()
         order_type = _validate_choice(order_type, _VALID_ORDER_TYPES, "type")
         if order_type not in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}:
-            raise DomainBadRequest("Stop order must be STOP_MARKET or TAKE_PROFIT_MARKET")
+            raise DomainBadRequest(
+                "Stop order must be STOP_MARKET or TAKE_PROFIT_MARKET"
+            )
 
         side_str = _normalize_side(side)
-        position_side = _validate_choice(position_side, _VALID_POSITION_SIDES, "position_side")
+        position_side = _validate_choice(
+            position_side, _VALID_POSITION_SIDES, "position_side"
+        )
         if working_type:
-            working_type = _validate_choice(working_type, _VALID_WORKING_TYPES, "working_type")
+            working_type = _validate_choice(
+                working_type, _VALID_WORKING_TYPES, "working_type"
+            )
 
         filters = await self.get_symbol_filters(sym)
         q_qty, q_stop = await self._client.quantize_order(sym, quantity, stop_price)
         if q_qty <= 0 or q_stop is None or q_stop <= 0:
-            raise DomainBadRequest("Quantized quantity/stop invalid for stop-market order")
+            raise DomainBadRequest(
+                "Quantized quantity/stop invalid for stop-market order"
+            )
 
         # Final clamp by LOT_SIZE step
         q_qty = _final_qty_clamp(filters, q_qty)
@@ -352,12 +377,12 @@ class BinanceTrading:
         symbol: str,
         side: OrderSide | str,
         quantity: Decimal,
-        price: Decimal,          # limit price
-        stop_price: Decimal,     # trigger price
+        price: Decimal,  # limit price
+        stop_price: Decimal,  # trigger price
         *,
         time_in_force: str = "GTC",
         reduce_only: bool = True,
-        working_type: str | None = None,   # CONTRACT_PRICE / MARK_PRICE
+        working_type: str | None = None,  # CONTRACT_PRICE / MARK_PRICE
         position_side: str | None = None,  # LONG/SHORT/BOTH (if dual-side)
         new_client_order_id: str | None = None,
     ) -> Dict[str, Any]:
@@ -373,9 +398,13 @@ class BinanceTrading:
         side_str = _normalize_side(side)
         tif = _validate_choice(time_in_force, _VALID_TIME_IN_FORCE, "time_in_force")
         if working_type:
-            working_type = _validate_choice(working_type, _VALID_WORKING_TYPES, "working_type")
+            working_type = _validate_choice(
+                working_type, _VALID_WORKING_TYPES, "working_type"
+            )
         if position_side:
-            position_side = _validate_choice(position_side, _VALID_POSITION_SIDES, "position_side")
+            position_side = _validate_choice(
+                position_side, _VALID_POSITION_SIDES, "position_side"
+            )
 
         filters = await self.get_symbol_filters(sym)
 
@@ -420,16 +449,22 @@ class BinanceTrading:
     # --- Management -----------------------------------------------------------
 
     async def cancel_order(self, symbol: str, order_id: int) -> Dict[str, Any]:
-        return await self._client.cancel_order(symbol=symbol.upper(), orderId=int(order_id))
+        return await self._client.cancel_order(
+            symbol=symbol.upper(), orderId=int(order_id)
+        )
 
     async def get_order(self, symbol: str, order_id: int) -> Dict[str, Any]:
-        return await self._client.query_order(symbol=symbol.upper(), orderId=int(order_id))
+        return await self._client.query_order(
+            symbol=symbol.upper(), orderId=int(order_id)
+        )
 
     async def list_open_orders(self, symbol: str | None = None) -> List[Dict[str, Any]]:
         return await self._client.open_orders(symbol=symbol)
 
     async def get_order_status(self, symbol: str, order_id: int) -> str:
-        result = await self._client.query_order(symbol=symbol.upper(), orderId=int(order_id))
+        result = await self._client.query_order(
+            symbol=symbol.upper(), orderId=int(order_id)
+        )
         return str(result.get("status", ""))
 
     async def close_position_market(
@@ -441,7 +476,9 @@ class BinanceTrading:
         position_side: str = "BOTH",
     ) -> Dict[str, Any]:
         side_str = _normalize_side(side)
-        position_side = _validate_choice(position_side, _VALID_POSITION_SIDES, "position_side")
+        position_side = _validate_choice(
+            position_side, _VALID_POSITION_SIDES, "position_side"
+        )
         return await self._client.close_position_market(
             symbol.upper(),
             side_str,

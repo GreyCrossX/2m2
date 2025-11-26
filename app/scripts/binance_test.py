@@ -1,28 +1,34 @@
 # app/scripts/binance_test.py
-import os, time, hmac, hashlib, requests
+import os
+import hmac
+import hashlib
+import requests
 from urllib.parse import urlencode
 
 API_KEY = os.getenv("BINANCE_USDSF_API_KEY", "")
 API_SECRET = os.getenv("BINANCE_USDSF_API_SECRET", "")
 BASE = "https://fapi.binance.com"  # prod USDⓈ-M Futures
 
+
 def sign(params: dict) -> str:
     q = urlencode(params, doseq=True)
     return hmac.new(API_SECRET.encode(), q.encode(), hashlib.sha256).hexdigest()
+
 
 def server_time_ms() -> int:
     r = requests.get(f"{BASE}/fapi/v1/time", timeout=10)
     r.raise_for_status()
     return int(r.json()["serverTime"])
 
+
 def order_test(
     symbol="BTCUSDT",
     side="BUY",
     order_type="LIMIT",
-    quantity="0.001",      # keep as string to avoid float drift
-    price="200000",        # far away so it wouldn't fill (just for shape)
+    quantity="0.001",  # keep as string to avoid float drift
+    price="200000",  # far away so it wouldn't fill (just for shape)
     time_in_force="GTC",
-    hedge_mode=False,      # set True if your account is in hedge mode
+    hedge_mode=False,  # set True if your account is in hedge mode
 ):
     ts = server_time_ms()
     params = {
@@ -52,6 +58,7 @@ def order_test(
         print("body:", r.json())
     except Exception:
         print("body:", r.text)
+
 
 if __name__ == "__main__":
     print("running order test...")

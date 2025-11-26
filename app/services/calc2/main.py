@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio
 import logging
-import signal
 from typing import List
 
 from redis.asyncio import Redis
@@ -11,6 +10,7 @@ from .utils.logging import setup_logging
 from .processors.symbol_processor import SymbolProcessor
 
 logger = logging.getLogger(__name__)
+
 
 async def _run_symbol(cfg: Config, r: Redis, sym: str) -> None:
     """Run processor for a single symbol."""
@@ -25,6 +25,7 @@ async def _run_symbol(cfg: Config, r: Redis, sym: str) -> None:
         logger.error("Symbol processor failed | sym=%s error=%s", sym, e, exc_info=True)
         raise
 
+
 async def main_async() -> None:
     setup_logging()
     log = logging.getLogger("calc.main")
@@ -37,14 +38,18 @@ async def main_async() -> None:
     log.info("  Redis: %s", cfg.redis_url)
     log.info("  MA Windows: 20=%d, 200=%d", cfg.ma20_window, cfg.ma200_window)
     log.info("  Stream Block: %dms", cfg.stream_block_ms)
-    log.info("  Stream Maxlen: ind=%d, signal=%d", cfg.stream_maxlen_ind, cfg.stream_maxlen_signal)
+    log.info(
+        "  Stream Maxlen: ind=%d, signal=%d",
+        cfg.stream_maxlen_ind,
+        cfg.stream_maxlen_signal,
+    )
     log.info("  Tick Size: %s", cfg.tick_size)
     log.info("  Backoff: min=%.2fs, max=%.2fs", cfg.backoff_min_s, cfg.backoff_max_s)
     log.info("  Catchup Threshold: %dms", cfg.catchup_threshold_ms)
     log.info("=" * 80)
-    
+
     r = Redis.from_url(cfg.redis_url, decode_responses=False)
-    
+
     try:
         # Test Redis connection
         await r.ping()
@@ -70,7 +75,7 @@ async def main_async() -> None:
             if not task.done():
                 task.cancel()
                 log.debug("Cancelled task | name=%s", task.get_name())
-        
+
         # Wait for all tasks to complete cancellation
         await asyncio.gather(*tasks, return_exceptions=True)
         log.info("All tasks cancelled")
@@ -82,10 +87,11 @@ async def main_async() -> None:
         await r.close()
         log.info("Calc Service stopped")
 
+
 def main() -> None:
     """Entry point for the calc service."""
     logger.info("Calc service starting up")
-    
+
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
@@ -93,6 +99,7 @@ def main() -> None:
     except Exception as e:
         logger.error("Fatal error in main | error=%s", e, exc_info=True)
         raise
+
 
 if __name__ == "__main__":
     main()

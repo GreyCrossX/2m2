@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional
 
 from ..application.order_executor import OrderExecutor
-from ..domain.enums import OrderStatus, SideWhitelist
+from ..domain.enums import OrderStatus
 from ..domain.models import ArmSignal, DisarmSignal, OrderState
 from ...infrastructure.binance.binance_trading import BinanceTrading
 
@@ -74,7 +74,9 @@ class BotWorker:
         # If we have a pending entry order, try to cancel it.
         if st.status in (OrderStatus.PENDING, OrderStatus.ARMED) and st.order_id:
             try:
-                await self._trading.cancel_order(symbol=st.symbol, order_id=int(st.order_id))
+                await self._trading.cancel_order(
+                    symbol=st.symbol, order_id=int(st.order_id)
+                )
                 st.status = OrderStatus.CANCELLED
             except Exception:
                 # Cancellation failure will be logged upstream; we leave state untouched.

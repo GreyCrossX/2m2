@@ -4,6 +4,7 @@ Revision ID: 8e1acb26fe0f
 Revises: 8bc02a6f4d3d
 Create Date: 2025-10-28 20:29:37.379239
 """
+
 from __future__ import annotations
 
 from typing import Sequence, Union
@@ -77,12 +78,12 @@ def upgrade() -> None:
     op.drop_table("bots_backup")
 
     op.alter_column(
-    "order_states",
-    "order_id",
-    type_=sa.BigInteger(),
-    existing_type=sa.VARCHAR(length=64),
-    existing_nullable=True,
-    postgresql_using="order_id::bigint",
+        "order_states",
+        "order_id",
+        type_=sa.BigInteger(),
+        existing_type=sa.VARCHAR(length=64),
+        existing_nullable=True,
+        postgresql_using="order_id::bigint",
     )
 
     op.alter_column(
@@ -122,8 +123,12 @@ def upgrade() -> None:
     )
     op.drop_index(op.f("ix_order_states_bot_sym_status"), table_name="order_states")
     op.drop_index(op.f("ix_order_states_created_at"), table_name="order_states")
-    op.create_index(op.f("ix_order_states_bot_id"), "order_states", ["bot_id"], unique=False)
-    op.create_index(op.f("ix_order_states_symbol"), "order_states", ["symbol"], unique=False)
+    op.create_index(
+        op.f("ix_order_states_bot_id"), "order_states", ["bot_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_order_states_symbol"), "order_states", ["symbol"], unique=False
+    )
     op.create_foreign_key(
         op.f("fk_order_states_bot_id_bots"),
         "order_states",
@@ -192,10 +197,14 @@ def downgrade() -> None:
     # ---------------------------------------------------------------------
     # AUTOGEN SECTION (kept as originally generated)
     # ---------------------------------------------------------------------
-    op.drop_constraint(op.f("fk_order_states_bot_id_bots"), "order_states", type_="foreignkey")
+    op.drop_constraint(
+        op.f("fk_order_states_bot_id_bots"), "order_states", type_="foreignkey"
+    )
     op.drop_index(op.f("ix_order_states_symbol"), table_name="order_states")
     op.drop_index(op.f("ix_order_states_bot_id"), table_name="order_states")
-    op.create_index(op.f("ix_order_states_created_at"), "order_states", ["created_at"], unique=False)
+    op.create_index(
+        op.f("ix_order_states_created_at"), "order_states", ["created_at"], unique=False
+    )
     op.create_index(
         op.f("ix_order_states_bot_sym_status"),
         "order_states",
@@ -250,7 +259,9 @@ def downgrade() -> None:
         sa.Column("user_id", sa.UUID(), autoincrement=False, nullable=True),
         sa.Column("cred_id", sa.UUID(), autoincrement=False, nullable=True),
         sa.Column("symbol", sa.VARCHAR(length=32), autoincrement=False, nullable=False),
-        sa.Column("timeframe", sa.VARCHAR(length=8), autoincrement=False, nullable=False),
+        sa.Column(
+            "timeframe", sa.VARCHAR(length=8), autoincrement=False, nullable=False
+        ),
         sa.Column("enabled", sa.BOOLEAN(), autoincrement=False, nullable=False),
         sa.Column(
             "env",
@@ -289,7 +300,9 @@ def downgrade() -> None:
             autoincrement=False,
             nullable=False,
         ),
-        sa.Column("nickname", sa.VARCHAR(length=64), autoincrement=False, nullable=False),
+        sa.Column(
+            "nickname", sa.VARCHAR(length=64), autoincrement=False, nullable=False
+        ),
         sa.Column(
             "created_at",
             postgresql.TIMESTAMP(timezone=True),
@@ -306,12 +319,24 @@ def downgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("bots_backup_pkey")),
     )
-    op.create_index(op.f("bots_backup_user_id_idx"), "bots_backup", ["user_id"], unique=False)
     op.create_index(
-        op.f("bots_backup_user_id_enabled_idx"), "bots_backup", ["user_id", "enabled"], unique=False
+        op.f("bots_backup_user_id_idx"), "bots_backup", ["user_id"], unique=False
     )
-    op.create_index(op.f("bots_backup_symbol_idx"), "bots_backup", ["symbol"], unique=False)
     op.create_index(
-        op.f("bots_backup_symbol_enabled_idx"), "bots_backup", ["symbol", "enabled"], unique=False
+        op.f("bots_backup_user_id_enabled_idx"),
+        "bots_backup",
+        ["user_id", "enabled"],
+        unique=False,
     )
-    op.create_index(op.f("bots_backup_cred_id_idx"), "bots_backup", ["cred_id"], unique=False)
+    op.create_index(
+        op.f("bots_backup_symbol_idx"), "bots_backup", ["symbol"], unique=False
+    )
+    op.create_index(
+        op.f("bots_backup_symbol_enabled_idx"),
+        "bots_backup",
+        ["symbol", "enabled"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("bots_backup_cred_id_idx"), "bots_backup", ["cred_id"], unique=False
+    )

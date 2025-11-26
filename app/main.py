@@ -8,20 +8,21 @@ import os
 from app.api.health import router as health_router
 from app.api.auth import router as auth_router
 from app.api.credentials import router as credentials_router
+from app.api.bots import router as bots_router
 
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Easy Bots"
-)
+app = FastAPI(title="Easy Bots")
 
 # Fail fast if required secrets are missing so the API doesn't start in an unsafe state.
-_required = [("SECRET_KEY", "JWT signing"), ("CREDENTIALS_MASTER_KEY", "API credential encryption")]
+_required = [
+    ("SECRET_KEY", "JWT signing"),
+    ("CREDENTIALS_MASTER_KEY", "API credential encryption"),
+]
 _missing = [name for name, _ in _required if not os.getenv(name)]
 if _missing:
     raise RuntimeError(
@@ -29,29 +30,38 @@ if _missing:
         "Set them in your environment or .env before starting the API."
     )
 
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all HTTP requests"""
     start_time = time.time()
-    
+
     # Log request
     logger.info(f"Request: {request.method} {request.url}")
-    
+
     # Process request
     response = await call_next(request)
-    
+
     # Log response
     process_time = time.time() - start_time
     logger.info(f"Response: {response.status_code} - {process_time:.4f}s")
-    
+
     # Add timing header
     response.headers["X-Process-Time"] = str(process_time)
-    
+
     return response
+
 
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["localhost", "127.0.0.1", "*.localhost", "*.railway.com", "*.railway.app", "*.vercel.app"]
+    allowed_hosts=[
+        "localhost",
+        "127.0.0.1",
+        "*.localhost",
+        "*.railway.com",
+        "*.railway.app",
+        "*.vercel.app",
+    ],
 )
 
 app.add_middleware(
@@ -59,15 +69,16 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://localhost:3000"
+        "https://localhost:3000",
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
-    expose_headers=["X-Total-Count", "X-Process-Time"]
+    expose_headers=["X-Total-Count", "X-Process-Time"],
 )
 
-#router
+# router
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(credentials_router)
+app.include_router(bots_router)

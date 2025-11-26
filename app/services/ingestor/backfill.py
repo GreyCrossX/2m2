@@ -21,15 +21,19 @@ STREAM_MAXLEN_2M = int(os.getenv("STREAM_MAXLEN_2M", "5000"))
 
 # ───────────────────────── helpers ─────────────────────────
 
+
 def _rest_base() -> str:
     market = (os.getenv("BINANCE_MARKET") or "um_futures").lower()
     if market in ("um_futures", "um-futures", "futures", "usdm"):
-        return "https://fapi.binance.com"   # USDⓈ-M Futures
+        return "https://fapi.binance.com"  # USDⓈ-M Futures
     if market in ("cm_futures", "cm-futures", "coinm"):
-        return "https://dapi.binance.com"   # COIN-M (unused here)
-    return "https://api.binance.com"        # spot fallback
+        return "https://dapi.binance.com"  # COIN-M (unused here)
+    return "https://api.binance.com"  # spot fallback
 
-def _build_klines_url(symbol: str, interval: str, limit: int, end_ms: int | None = None) -> str:
+
+def _build_klines_url(
+    symbol: str, interval: str, limit: int, end_ms: int | None = None
+) -> str:
     base = _rest_base()
     path = "/fapi/v1/klines" if "fapi" in base else "/api/v3/klines"
     q = {"symbol": symbol.upper(), "interval": interval, "limit": int(limit)}
@@ -37,10 +41,12 @@ def _build_klines_url(symbol: str, interval: str, limit: int, end_ms: int | None
         q["endTime"] = int(end_ms)
     return f"{base}{path}?{urlencode(q)}"
 
+
 def _http_get_json(url: str, timeout: int = 15) -> Any:
     req = Request(url, headers={"User-Agent": "ingestor-backfill/1.0"})
     with urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
 
 def _last_stream_ts(stream: str) -> int | None:
     """
@@ -56,9 +62,13 @@ def _last_stream_ts(stream: str) -> int | None:
         LOG.warning("xrevrange(%s) failed: %s", stream, e)
     return None
 
-def _xadd_with_caps(stream: str, fields: Dict[str, str], ts_ms: int, maxlen: int) -> str:
+
+def _xadd_with_caps(
+    stream: str, fields: Dict[str, str], ts_ms: int, maxlen: int
+) -> str:
     # explicit ID "<ts>-0" so MINID trims align with our bar timestamps
     return r.xadd(stream, fields, id=f"{ts_ms}-0", maxlen=maxlen, approximate=True)
+
 
 def _as_row_from_kl(line: List[Any]) -> Tuple[Dict[str, str], OneMinute]:
     """
@@ -70,7 +80,6 @@ def _as_row_from_kl(line: List[Any]) -> Tuple[Dict[str, str], OneMinute]:
       [ openTime, open, high, low, close, volume,
         closeTime, quoteVolume, trades, takerBuyBase, takerBuyQuote, ignore ]
     """
-    open_time = int(line[0])
     open_ = float(line[1])
     high = float(line[2])
     low = float(line[3])
@@ -101,7 +110,9 @@ def _as_row_from_kl(line: List[Any]) -> Tuple[Dict[str, str], OneMinute]:
     )
     return row, one
 
+
 # ───────────────────────── main ─────────────────────────
+
 
 async def backfill_symbol(
     sym: str,
@@ -171,7 +182,8 @@ async def backfill_symbol(
 
             # include optional color for 2m
             try:
-                o = float(two["open"]); c = float(two["close"])
+                o = float(two["open"])
+                c = float(two["close"])
                 two["color"] = "green" if c >= o else "red"
             except Exception:
                 pass
@@ -181,8 +193,14 @@ async def backfill_symbol(
                 wrote_2m += 1
                 last2 = ts2  # advance watermark
 
-        log.info("[backfill %s] wrote %d x 1m (+%d skipped) and %d x 2m (+%d skipped)",
-                 sym, wrote_1m, skipped_1m, wrote_2m, skipped_2m)
+        log.info(
+            "[backfill %s] wrote %d x 1m (+%d skipped) and %d x 2m (+%d skipped)",
+            sym,
+            wrote_1m,
+            skipped_1m,
+            wrote_2m,
+            skipped_2m,
+        )
 
         return {
             "ok": True,

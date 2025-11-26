@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/health", tags=["health"])
 
+
 @router.get("/", status_code=status.HTTP_200_OK)
 async def liveness():
     """Simple liveness probe (no external deps)."""
@@ -22,14 +23,17 @@ async def liveness():
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
+
 @router.get("/db", status_code=status.HTTP_200_OK)
 async def readiness_db(db: AsyncSession = Depends(get_db)):
     # Connectivity
     try:
         r = await db.execute(text("select 1"))
-        ok = (r.scalar_one() == 1)
+        ok = r.scalar_one() == 1
     except Exception as e:
-        raise HTTPException(status_code=503, detail={"code": "conn_failed", "msg": str(e)})
+        raise HTTPException(
+            status_code=503, detail={"code": "conn_failed", "msg": str(e)}
+        )
 
     # Migrations (soft)
     mig = {"present": None, "version": None}

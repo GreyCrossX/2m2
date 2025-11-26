@@ -90,14 +90,30 @@ class DryRunTrading:
 
     async def set_leverage(self, symbol: str, leverage: int | str, *_, **__):
         log.debug("[dry-run] set_leverage noop | %s -> %s", symbol, leverage)
-        return {"ok": True, "dry_run": True, "op": "set_leverage", "symbol": symbol, "leverage": leverage}
+        return {
+            "ok": True,
+            "dry_run": True,
+            "op": "set_leverage",
+            "symbol": symbol,
+            "leverage": leverage,
+        }
 
-    async def set_margin_type(self, symbol: str, margin_type: str = "ISOLATED", *_, **__):
+    async def set_margin_type(
+        self, symbol: str, margin_type: str = "ISOLATED", *_, **__
+    ):
         log.debug("[dry-run] set_margin_type noop | %s -> %s", symbol, margin_type)
-        return {"ok": True, "dry_run": True, "op": "set_margin_type", "symbol": symbol, "margin_type": margin_type}
+        return {
+            "ok": True,
+            "dry_run": True,
+            "op": "set_margin_type",
+            "symbol": symbol,
+            "margin_type": margin_type,
+        }
 
     # --- Helpers used by OrderExecutor ---
-    async def quantize_limit_order(self, symbol: str, qty: Decimal, price: Decimal) -> Tuple[Decimal, Decimal]:
+    async def quantize_limit_order(
+        self, symbol: str, qty: Decimal, price: Decimal
+    ) -> Tuple[Decimal, Decimal]:
         f = self._SYMBOL_FILTERS.get(symbol.upper(), {})
         price_tick = f.get("price_tick", self.DEFAULT_PRICE_TICK)
         qty_step = f.get("qty_step", self.DEFAULT_QTY_STEP)
@@ -106,11 +122,24 @@ class DryRunTrading:
         q_price = price.quantize(price_tick, rounding=ROUND_DOWN)
         q_qty = self._floor_to_step(qty, qty_step)
         if q_qty < min_qty:
-            log.debug("[dry-run] qty < min_qty; bumping | %s -> %s (symbol=%s)", q_qty, min_qty, symbol)
+            log.debug(
+                "[dry-run] qty < min_qty; bumping | %s -> %s (symbol=%s)",
+                q_qty,
+                min_qty,
+                symbol,
+            )
             q_qty = min_qty
 
-        log.debug("[dry-run] quantize | %s qty=%s->%s price=%s->%s step=%s tick=%s",
-                  symbol, qty, q_qty, price, q_price, qty_step, price_tick)
+        log.debug(
+            "[dry-run] quantize | %s qty=%s->%s price=%s->%s step=%s tick=%s",
+            symbol,
+            qty,
+            q_qty,
+            price,
+            q_price,
+            qty_step,
+            price_tick,
+        )
         return q_qty, q_price
 
     # --- Order creation methods (print payloads) ---
@@ -135,7 +164,9 @@ class DryRunTrading:
     async def cancel_order(self, **payload: Any) -> Dict[str, Any]:
         return await self._print_and_ok("cancel_order", payload)
 
-    async def _print_and_ok(self, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _print_and_ok(
+        self, method: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
         print("\n===== DRY RUN: ORDER PAYLOAD ({}) =====".format(method))
         print(json.dumps(payload, indent=2, default=str))
         print("===== END PAYLOAD =====\n")
@@ -196,7 +227,12 @@ async def run_dry_run(
 
     log.info(
         "Dry-run ARM | bot_id=%s symbol=%s side=%s trigger=%s stop=%s tf=%s",
-        bot_id_str, symbol, side.value, trigger, stop, cfg.timeframe
+        bot_id_str,
+        symbol,
+        side.value,
+        trigger,
+        stop,
+        cfg.timeframe,
     )
 
     # Infra
@@ -229,7 +265,7 @@ async def run_dry_run(
     )
 
     # Resolve the chosen bot
-    async with session_factory() as session:
+    async with session_factory():
         bot_id = UUID(bot_id_str)
         bot = await bot_repo.get_bot(bot_id)
         if not bot:
@@ -275,16 +311,18 @@ async def run_dry_run(
     print("\n===== DRY RUN RESULT: ORDER STATES =====")
     out = []
     for r in results:
-        out.append({
-            "bot_id": str(r.bot_id),
-            "symbol": r.symbol,
-            "side": r.side.value,
-            "status": r.status.value,
-            "qty": str(r.quantity),
-            "order_id": r.order_id,
-            "trigger": str(getattr(r, "trigger_price", "")),
-            "stop": str(getattr(r, "stop_price", "")),
-        })
+        out.append(
+            {
+                "bot_id": str(r.bot_id),
+                "symbol": r.symbol,
+                "side": r.side.value,
+                "status": r.status.value,
+                "qty": str(r.quantity),
+                "order_id": r.order_id,
+                "trigger": str(getattr(r, "trigger_price", "")),
+                "stop": str(getattr(r, "stop_price", "")),
+            }
+        )
     print(json.dumps(out, indent=2))
     print("===== END RESULT =====\n")
 
@@ -295,14 +333,23 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Dry-run a fake ARM signal and print the exact order payload (no Binance call)."
     )
-    p.add_argument("--bot-id", "--bot", dest="bot_id", required=True,
-                   help="Bot UUID to use (must be enabled and configured)")
+    p.add_argument(
+        "--bot-id",
+        "--bot",
+        dest="bot_id",
+        required=True,
+        help="Bot UUID to use (must be enabled and configured)",
+    )
     p.add_argument("--symbol", default="ETHUSDT")
     p.add_argument("--side", choices=["long", "short"], default="long")
     p.add_argument("--trigger", type=Decimal, required=True)
     p.add_argument("--stop", type=Decimal, required=True)
-    p.add_argument("--msg-id", default="dryrun-0001", help="Message ID to tag into the flow")
-    p.add_argument("--ms", type=int, default=None, help="Signal timestamp in ms; default=now()")
+    p.add_argument(
+        "--msg-id", default="dryrun-0001", help="Message ID to tag into the flow"
+    )
+    p.add_argument(
+        "--ms", type=int, default=None, help="Signal timestamp in ms; default=now()"
+    )
     return p.parse_args()
 
 

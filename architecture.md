@@ -28,3 +28,20 @@
 - Secrets: JWT signing key (`SECRET_KEY`) and credential encryption key (`CREDENTIALS_MASTER_KEY`) must be set for API/worker to function.  
 - Binance access: API key/secret per user is stored encrypted; worker decrypts per bot credential and instantiates clients keyed by (cred_id, env).  
 - Dry run: `DRY_RUN_MODE=true` forces worker to use the dry-run adapter while exercising the full pipeline.
+
+## Signal/Data Flow Diagram
+```
+Binance WS 1m  --->  Ingestor  --->  Redis Streams (market:1m/2m)
+                           \            ^
+                            \           |
+                             \-->  Calc2 (indicators/regime)  --->  Redis Streams (signals)
+                                                                    |
+                                                                    v
+                                                             Worker (SignalProcessor)
+                                                              |  |  \
+                                                              |  |   \--> OrderExecutor -> Binance Trading (or dry-run)
+                                                              |  |
+                                                              |   \--> OrderMonitor -> Postgres order_states
+                                                              v
+                                                         Postgres (bots, creds, order_states)
+```

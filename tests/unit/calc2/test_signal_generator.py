@@ -46,15 +46,18 @@ def test_neutral_to_trending_emits_arm(
     ind_low: Decimal,
 ) -> None:
     # Establish neutral baseline so _prev_regime is defined
-    assert generator.maybe_signals(
-        sym="BTCUSDT",
-        tf="2m",
-        now_ts=1,
-        regime="neutral",
-        ind_ts=1,
-        ind_high=Decimal("101"),
-        ind_low=Decimal("99"),
-    ) == []
+    assert (
+        generator.maybe_signals(
+            sym="BTCUSDT",
+            tf="2m",
+            now_ts=1,
+            regime="neutral",
+            ind_ts=1,
+            ind_high=Decimal("101"),
+            ind_low=Decimal("99"),
+        )
+        == []
+    )
 
     sigs = generator.maybe_signals(
         sym="BTCUSDT",
@@ -74,15 +77,18 @@ def test_neutral_to_trending_emits_arm(
 
 def test_indicator_update_emits_disarm_then_arm(generator: SignalGenerator) -> None:
     # Prime generator with neutral then short regime (initial ARM)
-    assert generator.maybe_signals(
-        sym="BTCUSDT",
-        tf="2m",
-        now_ts=1,
-        regime="neutral",
-        ind_ts=1,
-        ind_high=Decimal("101"),
-        ind_low=Decimal("99"),
-    ) == []
+    assert (
+        generator.maybe_signals(
+            sym="BTCUSDT",
+            tf="2m",
+            now_ts=1,
+            regime="neutral",
+            ind_ts=1,
+            ind_high=Decimal("101"),
+            ind_low=Decimal("99"),
+        )
+        == []
+    )
 
     sigs = generator.maybe_signals(
         sym="BTCUSDT",
@@ -118,15 +124,18 @@ def test_indicator_update_emits_disarm_then_arm(generator: SignalGenerator) -> N
 
 def test_regime_flip_emits_disarm_then_arm(generator: SignalGenerator) -> None:
     # Prime neutral -> long
-    assert generator.maybe_signals(
-        sym="BTCUSDT",
-        tf="2m",
-        now_ts=1,
-        regime="neutral",
-        ind_ts=1,
-        ind_high=Decimal("101"),
-        ind_low=Decimal("99"),
-    ) == []
+    assert (
+        generator.maybe_signals(
+            sym="BTCUSDT",
+            tf="2m",
+            now_ts=1,
+            regime="neutral",
+            ind_ts=1,
+            ind_high=Decimal("101"),
+            ind_low=Decimal("99"),
+        )
+        == []
+    )
 
     long_sigs = generator.maybe_signals(
         sym="BTCUSDT",
@@ -159,15 +168,18 @@ def test_regime_flip_emits_disarm_then_arm(generator: SignalGenerator) -> None:
 
 def test_same_indicator_no_duplicate_signals(generator: SignalGenerator) -> None:
     # Establish baseline neutral regime so subsequent ARM is emitted on transition
-    assert generator.maybe_signals(
-        sym="BTCUSDT",
-        tf="2m",
-        now_ts=9,
-        regime="neutral",
-        ind_ts=9,
-        ind_high=Decimal("104"),
-        ind_low=Decimal("99"),
-    ) == []
+    assert (
+        generator.maybe_signals(
+            sym="BTCUSDT",
+            tf="2m",
+            now_ts=9,
+            regime="neutral",
+            ind_ts=9,
+            ind_high=Decimal("104"),
+            ind_low=Decimal("99"),
+        )
+        == []
+    )
 
     _arm_for(
         generator,
@@ -178,12 +190,15 @@ def test_same_indicator_no_duplicate_signals(generator: SignalGenerator) -> None
     )
 
     # Repeat with identical indicator timestamp -> expect no signals
-    assert generator.maybe_signals(
-        sym="BTCUSDT",
-        tf="2m",
-        now_ts=11,
-        regime="long",
-        ind_ts=10,
-        ind_high=Decimal("105"),
-        ind_low=Decimal("100"),
-    ) == []
+    assert (
+        generator.maybe_signals(
+            sym="BTCUSDT",
+            tf="2m",
+            now_ts=11,
+            regime="long",
+            ind_ts=10,
+            ind_high=Decimal("105"),
+            ind_low=Decimal("100"),
+        )
+        == []
+    )

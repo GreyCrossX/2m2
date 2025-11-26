@@ -45,7 +45,9 @@ class WorkerPoller:
         self._metrics = metrics
         self._running = False
         self._reload_task: Optional[asyncio.Task] = None
-        self._router_refresh_seconds = router_refresh_seconds or getattr(config, "router_refresh_seconds", 60)
+        self._router_refresh_seconds = router_refresh_seconds or getattr(
+            config, "router_refresh_seconds", 60
+        )
         self._dedupe_ttl = max(dedupe_ttl_seconds, 1)
         self._router_fp: Optional[int] = None
 
@@ -57,7 +59,9 @@ class WorkerPoller:
 
         # Clean stale pendings so the group is healthy before starting
         with contextlib.suppress(Exception):
-            await self._consumer.cleanup_stale_pending(idle_ms=self._dedupe_ttl * 1000, limit=100)
+            await self._consumer.cleanup_stale_pending(
+                idle_ms=self._dedupe_ttl * 1000, limit=100
+            )
 
         logger.info(
             "Starting background router refresher (interval=%ds)...",
@@ -77,7 +81,9 @@ class WorkerPoller:
         logger.info("Beginning signal consumption loop...")
 
         # High-level loop: handler + ACK-on-success handled by the consumer (CG mode)
-        await self._consumer.consume_and_handle(self._handle_message, dedupe_ttl_sec=self._dedupe_ttl)
+        await self._consumer.consume_and_handle(
+            self._handle_message, dedupe_ttl_sec=self._dedupe_ttl
+        )
 
     async def stop(self) -> None:
         """Graceful shutdown for background tasks."""
@@ -129,6 +135,15 @@ class WorkerPoller:
         msg_id = message.message_id
         msg_type = str(payload.get("type", "")).lower()
 
+        # Observe lag if payload carries epoch ms timestamp
+        try:
+            ts_ms = int(str(payload.get("ts")))
+            lag_ms = (asyncio.get_event_loop().time() * 1000.0) - ts_ms
+            if lag_ms >= 0:
+                self._metrics.observe_signal_lag_ms(lag_ms)
+        except Exception:
+            pass
+
         logger.debug("Parsing signal | %s", format_log_context(log_context))
 
         if msg_type == SignalType.ARM.value:
@@ -144,7 +159,11 @@ class WorkerPoller:
                 )
             except Exception as exc:
                 self._metrics.inc_processed(status="error")
-                logger.error("Failed to parse ARM signal | err=%s | %s", exc, format_log_context(log_context))
+                logger.error(
+                    "Failed to parse ARM signal | err=%s | %s",
+                    exc,
+                    format_log_context(log_context),
+                )
                 raise InvalidSignalException(f"Invalid ARM signal: {exc}") from exc
 
             await self._sp.process_arm_signal(signal, msg_id, log_context)
@@ -167,7 +186,11 @@ class WorkerPoller:
                 )
             except Exception as exc:
                 self._metrics.inc_processed(status="error")
-                logger.error("Failed to parse DISARM signal | err=%s | %s", exc, format_log_context(log_context))
+                logger.error(
+                    "Failed to parse DISARM signal | err=%s | %s",
+                    exc,
+                    format_log_context(log_context),
+                )
                 raise InvalidSignalException(f"Invalid DISARM signal: {exc}") from exc
 
             await self._sp.process_disarm_signal(signal, msg_id, log_context)
@@ -192,25 +215,38 @@ class WorkerPoller:
             for bot in bots:
                 logger.info(
                     "  Bot: id=%s user=%s symbol=%s tf=%s side=%s leverage=%dx env=%s",
-                    bot.id, bot.user_id, bot.symbol, bot.timeframe,
-                    bot.side_whitelist.value, bot.leverage, bot.env,
+                    bot.id,
+                    bot.user_id,
+                    bot.symbol,
+                    bot.timeframe,
+                    bot.side_whitelist.value,
+                    bot.leverage,
+                    bot.env,
                 )
         else:
             logger.warning("No enabled bots found in database")
 
-        fingerprint = hash(tuple(sorted((str(b.id), b.symbol.upper(), b.timeframe) for b in bots)))
+        fingerprint = hash(
+            tuple(sorted((str(b.id), b.symbol.upper(), b.timeframe) for b in bots))
+        )
         if fingerprint != self._router_fp:
             logger.info("Rebuilding router subscriptions...")
             self._router.reload_subscriptions(bots)
             self._router_fp = fingerprint
-            symbols_str = ",".join(sorted({b.symbol.upper() for b in bots})) if bots else "-"
-            logger.info("Router rebuilt | subs=%d symbols=%s", len(self._router), symbols_str)
+            symbols_str = (
+                ",".join(sorted({b.symbol.upper() for b in bots})) if bots else "-"
+            )
+            logger.info(
+                "Router rebuilt | subs=%d symbols=%s", len(self._router), symbols_str
+            )
         else:
             logger.debug("Router fingerprint unchanged | subs=%d", len(self._router))
 
     async def _reload_bots_periodically(self) -> None:
         """Periodically refresh router subscriptions to reflect DB changes."""
-        logger.info("Router refresher started (interval=%ds)", self._router_refresh_seconds)
+        logger.info(
+            "Router refresher started (interval=%ds)", self._router_refresh_seconds
+        )
         try:
             while self._running:
                 await asyncio.sleep(self._router_refresh_seconds)

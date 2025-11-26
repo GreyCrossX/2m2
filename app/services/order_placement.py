@@ -81,7 +81,9 @@ def _to_int_or_none(value: object) -> Optional[int]:
 class OrderPlacementService:
     """Provide atomic placement and rollback for entry/stop/take-profit orders."""
 
-    def __init__(self, trading: TradingPort, *, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self, trading: TradingPort, *, logger: logging.Logger | None = None
+    ) -> None:
         self._trading = trading
         self._log = logger or logging.getLogger(__name__)
 
@@ -118,12 +120,23 @@ class OrderPlacementService:
         except DomainExchangeError as exc:
             raise BinanceAPIException(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
-            raise BinanceAPIException(f"Unexpected create_limit_order error: {exc}") from exc
+            raise BinanceAPIException(
+                f"Unexpected create_limit_order error: {exc}"
+            ) from exc
 
-        entry_id = _to_int_or_none(entry_resp.get("orderId")) if isinstance(entry_resp, dict) else None
+        entry_id = (
+            _to_int_or_none(entry_resp.get("orderId"))
+            if isinstance(entry_resp, dict)
+            else None
+        )
         self._log.info(
             "order.entry_placed",
-            extra={**ctx, "symbol": symbol, "entry_order_id": entry_id, "side": side.value},
+            extra={
+                **ctx,
+                "symbol": symbol,
+                "entry_order_id": entry_id,
+                "side": side.value,
+            },
         )
 
         stop_id: Optional[int] = None
@@ -138,14 +151,25 @@ class OrderPlacementService:
                 reduce_only=True,
                 order_type="STOP_MARKET",
             )
-            stop_id = _to_int_or_none(stop_resp.get("orderId")) if isinstance(stop_resp, dict) else None
+            stop_id = (
+                _to_int_or_none(stop_resp.get("orderId"))
+                if isinstance(stop_resp, dict)
+                else None
+            )
             self._log.info(
                 "order.stop_placed",
-                extra={**ctx, "symbol": symbol, "stop_order_id": stop_id, "side": exit_side.value},
+                extra={
+                    **ctx,
+                    "symbol": symbol,
+                    "stop_order_id": stop_id,
+                    "side": exit_side.value,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             await self.rollback_orders(symbol, [entry_id], context=ctx)
-            raise BinanceAPIException(f"create_stop_market_order failed: {exc}") from exc
+            raise BinanceAPIException(
+                f"create_stop_market_order failed: {exc}"
+            ) from exc
 
         try:
             tp_resp = await self._trading.create_take_profit_limit(
@@ -157,10 +181,19 @@ class OrderPlacementService:
                 reduce_only=True,
                 time_in_force="GTC",
             )
-            tp_id = _to_int_or_none(tp_resp.get("orderId")) if isinstance(tp_resp, dict) else None
+            tp_id = (
+                _to_int_or_none(tp_resp.get("orderId"))
+                if isinstance(tp_resp, dict)
+                else None
+            )
             self._log.info(
                 "order.tp_placed",
-                extra={**ctx, "symbol": symbol, "tp_order_id": tp_id, "side": exit_side.value},
+                extra={
+                    **ctx,
+                    "symbol": symbol,
+                    "tp_order_id": tp_id,
+                    "side": exit_side.value,
+                },
             )
         except DomainBadRequest as exc:
             await self.rollback_orders(symbol, [stop_id, entry_id], context=ctx)
@@ -176,7 +209,9 @@ class OrderPlacementService:
             raise BinanceAPIException(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             await self.rollback_orders(symbol, [stop_id, entry_id], context=ctx)
-            raise BinanceAPIException(f"create_take_profit_limit failed: {exc}") from exc
+            raise BinanceAPIException(
+                f"create_take_profit_limit failed: {exc}"
+            ) from exc
 
         return TrioOrderResult(
             entry_order_id=entry_id,
@@ -197,7 +232,10 @@ class OrderPlacementService:
                 continue
             try:
                 await self._trading.cancel_order(symbol=symbol, order_id=int(oid))
-                self._log.info("order.rollback_cancelled", extra={**ctx, "symbol": symbol, "order_id": oid})
+                self._log.info(
+                    "order.rollback_cancelled",
+                    extra={**ctx, "symbol": symbol, "order_id": oid},
+                )
             except Exception as exc:  # noqa: BLE001
                 self._log.warning(
                     "order.rollback_failed",

@@ -1,4 +1,5 @@
 """Async wrapper around the synchronous :class:`BinanceUSDS` adapter."""
+
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +56,9 @@ class BinanceClient:
     # ---------------------------
     async def _call(self, func, /, *args, **kwargs):
         call = partial(func, *args, **kwargs)
-        return await asyncio.wait_for(asyncio.to_thread(call), timeout=self._call_timeout)
+        return await asyncio.wait_for(
+            asyncio.to_thread(call), timeout=self._call_timeout
+        )
 
     # ---------------------------
     # Exchange info / filters
@@ -123,7 +126,9 @@ class BinanceClient:
 
     async def change_leverage(self, symbol: str, leverage: int) -> dict:
         """Update leverage for a symbol."""
-        return await self._call(self._gateway.change_leverage, symbol.upper(), int(leverage))
+        return await self._call(
+            self._gateway.change_leverage, symbol.upper(), int(leverage)
+        )
 
     # ---------------------------
     # Quantization helpers
@@ -139,8 +144,10 @@ class BinanceClient:
         MUST floor to Binance LOT_SIZE / PRICE_FILTER (ROUND_DOWN) to avoid precision errors.
         """
         filters = await self._get_symbol_filters(symbol)
-        q_qty = quantize_qty(filters, quantity)               # expected to floor to stepSize
-        q_price = quantize_price(filters, price) if price is not None else None  # floor to tickSize
+        q_qty = quantize_qty(filters, quantity)  # expected to floor to stepSize
+        q_price = (
+            quantize_price(filters, price) if price is not None else None
+        )  # floor to tickSize
         return q_qty, q_price
 
     # ---------------------------
@@ -174,19 +181,25 @@ class BinanceClient:
     async def new_order(self, **params: Any) -> dict:
         """Submit a new order with payload normalization/logging."""
         payload = self._prepare_payload(params)
-        logger.debug("binance_new_order", extra={"payload": self._redact_payload(payload)})
+        logger.debug(
+            "binance_new_order", extra={"payload": self._redact_payload(payload)}
+        )
         return await self._call(self._gateway.new_order, **payload)
 
     async def query_order(self, **params: Any) -> dict:
         """Query order status from Binance."""
         payload = self._prepare_payload(params)
-        logger.debug("binance_query_order", extra={"payload": self._redact_payload(payload)})
+        logger.debug(
+            "binance_query_order", extra={"payload": self._redact_payload(payload)}
+        )
         return await self._call(self._gateway.query_order, **payload)
 
     async def cancel_order(self, **params: Any) -> dict:
         """Cancel an existing order."""
         payload = self._prepare_payload(params)
-        logger.debug("binance_cancel_order", extra={"payload": self._redact_payload(payload)})
+        logger.debug(
+            "binance_cancel_order", extra={"payload": self._redact_payload(payload)}
+        )
         return await self._call(self._gateway.cancel_order, **payload)
 
     async def open_orders(self, symbol: str | None = None) -> list[dict]:

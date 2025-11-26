@@ -32,7 +32,9 @@ def _get_secret_key() -> str:
     key = _cfg("SECRET_KEY", None)
     if key:
         return str(key)
-    raise RuntimeError("SECRET_KEY is not set; define it in your environment or .env file.")
+    raise RuntimeError(
+        "SECRET_KEY is not set; define it in your environment or .env file."
+    )
 
 
 def _get_algorithm() -> str:

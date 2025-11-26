@@ -1,6 +1,5 @@
 from decimal import Decimal
 
-import pytest
 
 from app.services.calc2.regime.detector import RegimeDetector
 

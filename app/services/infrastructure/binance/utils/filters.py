@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_DOWN, InvalidOperation
-from typing import Any, Dict, Tuple
+from decimal import Decimal, ROUND_DOWN
+from typing import Any, Dict
 
 
 def _D(x: Any) -> Decimal:
@@ -34,7 +34,9 @@ def _quantize_to_precision(value: Decimal, digits: int) -> Decimal:
     return value.quantize(quantum, rounding=ROUND_DOWN)
 
 
-def build_symbol_filters(exchange_info: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def build_symbol_filters(
+    exchange_info: Dict[str, Any],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
     Build a map: { SYMBOL: { FILTER_TYPE: filter_dict, 'META': {...} } }
     Ensures we have fast access to LOT_SIZE, PRICE_FILTER, (MIN_)NOTIONAL and useful META.
@@ -75,7 +77,7 @@ def quantize_qty(filters: Dict[str, Dict[str, Any]], quantity: Decimal) -> Decim
     """
     Quantize/floor quantity using LOT_SIZE.stepSize, or fall back to quantityPrecision/meta when needed.
     Returns 0 if the floored qty falls below LOT_SIZE.minQty (so caller can treat as invalid/too small).
-    
+
     NOTE: Enforces a maximum of 3 decimal places for all quantities to comply with Binance precision rules.
     """
     qty = _D(quantity)
@@ -114,7 +116,9 @@ def quantize_qty(filters: Dict[str, Dict[str, Any]], quantity: Decimal) -> Decim
     return q_qty
 
 
-def quantize_price(filters: Dict[str, Dict[str, Any]], price: Decimal | None) -> Decimal | None:
+def quantize_price(
+    filters: Dict[str, Dict[str, Any]], price: Decimal | None
+) -> Decimal | None:
     """
     Quantize/floor price using PRICE_FILTER.tickSize, or fall back to pricePrecision/meta when needed.
     """
@@ -144,8 +148,12 @@ def quantize_price(filters: Dict[str, Dict[str, Any]], price: Decimal | None) ->
 
     # Respect min/max bounds where present
     if min_price > 0 and q_price < min_price:
-        q_price = min_price if tick <= 0 else min_price.quantize(tick, rounding=ROUND_DOWN)
+        q_price = (
+            min_price if tick <= 0 else min_price.quantize(tick, rounding=ROUND_DOWN)
+        )
     if max_price > 0 and q_price > max_price:
-        q_price = max_price if tick <= 0 else max_price.quantize(tick, rounding=ROUND_DOWN)
+        q_price = (
+            max_price if tick <= 0 else max_price.quantize(tick, rounding=ROUND_DOWN)
+        )
 
     return q_price

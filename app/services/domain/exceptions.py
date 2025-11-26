@@ -1,4 +1,5 @@
 """Domain-level exceptions shared across services."""
+
 from __future__ import annotations
 
 

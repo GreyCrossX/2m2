@@ -26,6 +26,7 @@ class SignalType(str, Enum):
 
 class OrderSide(str, Enum):
     """Side applicable to orders and order_states.side (Postgres enum: order_side_enum)."""
+
     LONG = "long"
     SHORT = "short"
 
@@ -61,6 +62,7 @@ class SideWhitelist(str, Enum):
     Bot configuration whitelist (Postgres enum: side_whitelist_enum).
     Note: not to be used in order_states; only in config/whitelist checks.
     """
+
     BOTH = "both"
     LONG = "long"
     SHORT = "short"

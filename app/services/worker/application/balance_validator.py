@@ -19,16 +19,18 @@ class BinanceAccount(Protocol):
       - fetch_usdt_balance(cred_id, env) -> Decimal           (old)
       - fetch_used_margin(cred_id, env) -> Decimal            (old)
     """
+
     # New / preferred (from /fapi/v2/account.availableBalance)
     async def fetch_um_available_balance(self, cred_id: UUID, env: str) -> Decimal: ...  # type: ignore[empty-body]
 
     # Legacy pair (we'll derive available = free - used)
-    async def fetch_usdt_balance(self, cred_id: UUID, env: str) -> Decimal: ...         # type: ignore[empty-body]
-    async def fetch_used_margin(self, cred_id: UUID, env: str) -> Decimal: ...          # type: ignore[empty-body]
+    async def fetch_usdt_balance(self, cred_id: UUID, env: str) -> Decimal: ...  # type: ignore[empty-body]
+    async def fetch_used_margin(self, cred_id: UUID, env: str) -> Decimal: ...  # type: ignore[empty-body]
 
 
 class BalanceCache(Protocol):
     """Cache available balance by credential+env with short TTL."""
+
     async def get(self, cred_id: UUID, env: str) -> Decimal | None: ...
     async def set(self, cred_id: UUID, env: str, value: Decimal) -> None: ...
 
@@ -40,6 +42,7 @@ class BalanceValidator:
     Uses Binance *availableBalance* if the adapter provides it, otherwise
     falls back to (free - used_margin). Caches per (cred_id, env).
     """
+
     binance_account: BinanceAccount
     balance_cache: BalanceCache
 
@@ -76,7 +79,9 @@ class BalanceValidator:
         # Preferred: direct availableBalance from UM futures account endpoint.
         if hasattr(self.binance_account, "fetch_um_available_balance"):
             try:
-                available = await self.binance_account.fetch_um_available_balance(cred_id, env)  # type: ignore[attr-defined]
+                available = await self.binance_account.fetch_um_available_balance(
+                    cred_id, env
+                )  # type: ignore[attr-defined]
             except Exception:
                 # Defensive fallback to legacy pair if the new call fails at runtime
                 available = await self._fallback_available(cred_id, env)
@@ -99,7 +104,7 @@ class BalanceValidator:
         except Exception:
             pass
         try:
-            used = await self.binance_account.fetch_used_margin(cred_id, env)   # type: ignore[attr-defined]
+            used = await self.binance_account.fetch_used_margin(cred_id, env)  # type: ignore[attr-defined]
         except Exception:
             pass
 

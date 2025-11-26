@@ -32,7 +32,7 @@ def _ensure_fernet() -> Fernet:
         raw_bytes = raw
 
     digest = hashlib.sha256(raw_bytes).digest()  # 32 bytes
-    fkey = base64.urlsafe_b64encode(digest)      # Fernet-formatted key
+    fkey = base64.urlsafe_b64encode(digest)  # Fernet-formatted key
     _fernet = Fernet(fkey)
     return _fernet
 

@@ -16,6 +16,7 @@ from ...domain.models import OrderState
 
 # ------------------ mappers ------------------
 
+
 def _from_domain(s: OrderState) -> dict:
     """
     Domain -> ORM payload.
@@ -35,7 +36,9 @@ def _from_domain(s: OrderState) -> dict:
         stop_price=Decimal(s.stop_price),
         quantity=Decimal(s.quantity),
         filled_quantity=Decimal(s.filled_quantity or 0),
-        avg_fill_price=Decimal(s.avg_fill_price) if s.avg_fill_price is not None else None,
+        avg_fill_price=Decimal(s.avg_fill_price)
+        if s.avg_fill_price is not None
+        else None,
         last_fill_at=s.last_fill_at,
         created_at=s.created_at,
         updated_at=s.updated_at,
@@ -88,6 +91,7 @@ def _to_domain(r: OrderStateRecord) -> OrderState:
 
 # ------------------ gateway ------------------
 
+
 class OrderGateway:
     """Persistence adapter for OrderState backed by PostgreSQL."""
 
@@ -136,16 +140,13 @@ class OrderGateway:
         """
         active_statuses = tuple(statuses or (OrderStatus.PENDING, OrderStatus.ARMED))
         async with self._session_factory() as session:
-            stmt = (
-                select(OrderStateRecord)
-                .where(
-                    and_(
-                        OrderStateRecord.bot_id == bot_id,
-                        OrderStateRecord.symbol == symbol,
-                        OrderStateRecord.side == side.value,
-                        OrderStateRecord.status.in_([s.value for s in active_statuses]),
-                        OrderStateRecord.order_id.isnot(None),  # << key change
-                    )
+            stmt = select(OrderStateRecord).where(
+                and_(
+                    OrderStateRecord.bot_id == bot_id,
+                    OrderStateRecord.symbol == symbol,
+                    OrderStateRecord.side == side.value,
+                    OrderStateRecord.status.in_([s.value for s in active_statuses]),
+                    OrderStateRecord.order_id.isnot(None),  # << key change
                 )
             )
             res = await session.execute(stmt)

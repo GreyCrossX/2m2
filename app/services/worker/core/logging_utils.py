@@ -16,7 +16,9 @@ def format_log_context(context: Mapping[str, Any]) -> str:
     return " ".join(parts)
 
 
-def ensure_log_context(context: Mapping[str, Any] | None, **updates: Any) -> MutableMapping[str, Any]:
+def ensure_log_context(
+    context: Mapping[str, Any] | None, **updates: Any
+) -> MutableMapping[str, Any]:
     """Copy the provided context and merge additional fields for downstream logs."""
     merged: MutableMapping[str, Any] = dict(context or {})
     for key, value in updates.items():
