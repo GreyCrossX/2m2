@@ -29,8 +29,10 @@ def _cfg(name: str, default: Any) -> Any:
 
 
 def _get_secret_key() -> str:
-    # env override: SECRET_KEY
-    return str(_cfg("SECRET_KEY", "super_secret_key"))
+    key = _cfg("SECRET_KEY", None)
+    if key:
+        return str(key)
+    raise RuntimeError("SECRET_KEY is not set; define it in your environment or .env file.")
 
 
 def _get_algorithm() -> str:

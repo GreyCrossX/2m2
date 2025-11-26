@@ -3,6 +3,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 import time
 import logging
+import os
 
 from app.api.health import router as health_router
 from app.api.auth import router as auth_router
@@ -18,6 +19,15 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Easy Bots"
 )
+
+# Fail fast if required secrets are missing so the API doesn't start in an unsafe state.
+_required = [("SECRET_KEY", "JWT signing"), ("CREDENTIALS_MASTER_KEY", "API credential encryption")]
+_missing = [name for name, _ in _required if not os.getenv(name)]
+if _missing:
+    raise RuntimeError(
+        f"Missing required environment variable(s): {', '.join(_missing)}. "
+        "Set them in your environment or .env before starting the API."
+    )
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

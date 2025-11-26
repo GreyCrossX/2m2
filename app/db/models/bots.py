@@ -10,8 +10,8 @@ from sqlalchemy.sql import func
 from sqlalchemy import Enum as SAEnum
 
 from app.db.base import Base
+from app.db.models.shared_enums import EnvEnum
 
-EnvEnum = SAEnum("testnet", "prod", name="env_enum", create_type=True)
 SideWhitelistEnum = SAEnum("long", "short", "both", name="side_whitelist_enum", create_type=True)
 
 

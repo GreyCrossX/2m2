@@ -5,8 +5,7 @@ from sqlalchemy.sql import func
 
 from app.db.base import Base
 from app.core.crypto import encrypt_secret, decrypt_secret  # <- add
-
-EnvEnum = Enum("testnet", "prod", name="env_enum", create_type=True)
+from app.db.models.shared_enums import EnvEnum
 
 class ApiCredential(Base):
     """
