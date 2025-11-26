@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 
@@ -54,7 +54,7 @@ def _last_stream_ts(stream: str) -> int | None:
     or None if the stream is empty or on error.
     """
     try:
-        last = r.xrevrange(stream, count=1)
+        last = cast(list, r.xrevrange(stream, count=1))
         if last:
             last_id, _ = last[0]
             return int(last_id.split("-")[0])
@@ -67,7 +67,16 @@ def _xadd_with_caps(
     stream: str, fields: Dict[str, str], ts_ms: int, maxlen: int
 ) -> str:
     # explicit ID "<ts>-0" so MINID trims align with our bar timestamps
-    return r.xadd(stream, fields, id=f"{ts_ms}-0", maxlen=maxlen, approximate=True)
+    fields_cast = cast(dict, fields)
+    return str(
+        r.xadd(
+            stream,
+            fields_cast,
+            id=f"{ts_ms}-0",
+            maxlen=maxlen,
+            approximate=True,
+        )
+    )  # type: ignore[arg-type]
 
 
 def _as_row_from_kl(line: List[Any]) -> Tuple[Dict[str, str], OneMinute]:

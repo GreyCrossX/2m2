@@ -5,7 +5,7 @@ import contextlib
 import logging
 import signal
 import os
-from typing import Dict, Tuple
+from typing import Awaitable, Callable, Dict, Tuple, cast
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -13,8 +13,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .application.balance_validator import BalanceValidator
-from .application.order_executor import OrderExecutor
-from .application.order_monitor import BinanceOrderMonitor
+from .application.order_executor import OrderExecutor, TradingPort
+from .application.order_monitor import BinanceOrderMonitor, TradingClient
 from .application.position_manager import PositionManager
 from .application.signal_processor import SignalProcessor
 from .config import Config
@@ -25,9 +25,6 @@ from app.services.infrastructure.binance import (
     BinanceAccount,
     BinanceClient,
     BinanceTrading,
-)
-from app.services.infrastructure.binance.binance_trading import (
-    TradingPort as BinanceTradingPort,
 )
 from .infrastructure.cache.balance_cache import BalanceCache
 from .infrastructure.metrics import WorkerMetrics
@@ -182,14 +179,14 @@ async def main_async() -> None:
 
     async def trading_factory(
         bot_cfg: BotConfig,
-    ) -> BinanceTradingPort | DryRunTradingAdapter:
+    ) -> TradingPort:
         log.debug(
             "Creating trading adapter | bot_id=%s symbol=%s", bot_cfg.id, bot_cfg.symbol
         )
         if cfg.dry_run_mode and dry_run_adapter is not None:
-            return dry_run_adapter
+            return cast(TradingPort, dry_run_adapter)
         client = await get_binance_client(bot_cfg.cred_id, bot_cfg.env)
-        return BinanceTrading(client)
+        return cast(TradingPort, BinanceTrading(client))
 
     metrics = WorkerMetrics()
 
@@ -204,7 +201,10 @@ async def main_async() -> None:
         bot_repository=bot_repo,
         order_gateway=order_gateway,
         position_manager=position_manager,
-        trading_factory=trading_factory,
+        trading_factory=cast(
+            Callable[[BotConfig], Awaitable["TradingClient"]],
+            trading_factory,
+        ),
         poll_interval=float(cfg.order_monitor_interval_seconds),
         metrics=metrics,
     )

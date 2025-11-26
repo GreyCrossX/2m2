@@ -4,12 +4,12 @@ import logging
 import random
 import time
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, cast
 
 from redis.asyncio import Redis
 
 from ..config import Config
-from ..models import IndicatorState, Candle
+from ..models import ArmSignal, DisarmSignal, IndicatorState, Candle
 from ..indicators.calculator import IndicatorCandle
 from ..indicators.tracker import IndicatorTracker
 from ..regime.detector import RegimeDetector
@@ -41,7 +41,7 @@ class SymbolProcessor:
         # Close price tracking
         self._last_red: Optional[Candle] = None
         self._last_green: Optional[Candle] = None
-        self._last_signal: Optional[object] = None
+        self._last_signal: Optional[ArmSignal | DisarmSignal] = None
 
         # Catchup mode tracking
         self._catchup_mode = True
@@ -183,20 +183,23 @@ class SymbolProcessor:
                     self._last_id = ind_id
 
                     # NEW: generate 0..2 signals (supports DISARM+ARM on direct flips)
-                    sigs = self.signals.maybe_signals(
-                        sym=c.sym,
-                        tf=c.tf,
-                        now_ts=c.ts,
-                        regime=regime,
-                        ind_ts=ind_ts,
-                        ind_high=ind_high,
-                        ind_low=ind_low,
+                    sigs: list[ArmSignal | DisarmSignal] = cast(
+                        list[ArmSignal | DisarmSignal],
+                        self.signals.maybe_signals(
+                            sym=c.sym,
+                            tf=c.tf,
+                            now_ts=c.ts,
+                            regime=regime,
+                            ind_ts=ind_ts,
+                            ind_high=ind_high,
+                            ind_low=ind_low,
+                        ),
                     )
 
                     if sigs:
                         if self._catchup_mode:
                             # NEW: in catchup we keep ONLY the last signal (ARM if flip), workers weren’t acting yet.
-                            self._last_signal = sigs[-1]
+                            self._last_signal = cast(ArmSignal | DisarmSignal, sigs[-1])
                             for s in sigs:
                                 logger.debug(
                                     "Buffered (catchup) signal candidate | sym=%s type=%s side=%s ts=%d",
@@ -270,12 +273,13 @@ class SymbolProcessor:
         )
 
         if self._last_signal is not None:
-            await self.publisher.publish_signal(self._last_signal.to_stream_map())
+            last_sig = self._last_signal
+            await self.publisher.publish_signal(last_sig.to_stream_map())
             self._signal_count += 1
             logger.info(
                 "Emitted final catchup signal | sym=%s type=%s count=%d",
                 self.sym,
-                getattr(self._last_signal, "type", "unknown"),
+                last_sig.type,
                 self._signal_count,
             )
             self._last_signal = None

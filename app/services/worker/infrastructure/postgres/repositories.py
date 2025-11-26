@@ -52,15 +52,15 @@ def _to_bot_config(row: ORMBot) -> BotConfig:
         user_id=cast(UUID, row.user_id),
         cred_id=cast(UUID, row.cred_id),
         symbol=(row.symbol or "").upper(),
-        timeframe=row.timeframe,
+        timeframe=str(row.timeframe),
         enabled=bool(row.enabled),
         env=str(row.env),  # "testnet" | "prod"
         side_whitelist=_map_side_whitelist(row.side_whitelist),
-        leverage=int(row.leverage),
+        leverage=int(cast(int, row.leverage) if row.leverage is not None else 0),
         use_balance_pct=bool(row.use_balance_pct),
-        balance_pct=Decimal(row.balance_pct or 0),
-        fixed_notional=Decimal(row.fixed_notional or 0),
-        max_position_usdt=Decimal(row.max_position_usdt or 0),
+        balance_pct=Decimal(str(row.balance_pct or 0)),
+        fixed_notional=Decimal(str(row.fixed_notional or 0)),
+        max_position_usdt=Decimal(str(row.max_position_usdt or 0)),
     )
 
 

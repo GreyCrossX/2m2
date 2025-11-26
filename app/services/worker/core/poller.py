@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, cast
 
 from redis.asyncio import Redis
 
@@ -131,7 +131,7 @@ class WorkerPoller:
         log_context: Dict[str, str],
     ) -> Dict[str, str]:
         """Parse the payload and invoke the appropriate SignalProcessor handler."""
-        payload = message.payload
+        payload = cast(Dict[str, str], message.payload)
         msg_id = message.message_id
         msg_type = str(payload.get("type", "")).lower()
 

@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import signal
-from typing import Dict, Any
-from datetime import datetime, timezone
 import os
 import time
+import logging
+import signal
+from datetime import datetime, timezone
+from typing import Any, Dict, cast
 
 from app.config import settings
 from .redis_io import (
@@ -76,13 +76,16 @@ def _xadd_with_caps(
       - explicit ID = '<close_ts_ms>-0' (lets us trim by time with MINID)
       - MAXLEN ~ maxlen (approximate, efficient)
     """
-    return r.xadd(
-        stream,
-        fields,
-        id=f"{ts_ms}-0",
-        maxlen=maxlen,
-        approximate=True,
-    )
+    fields_cast = cast(dict, fields)
+    return str(
+        r.xadd(
+            stream,
+            fields_cast,
+            id=f"{ts_ms}-0",
+            maxlen=maxlen,
+            approximate=True,
+        )
+    )  # type: ignore[arg-type]
 
 
 async def _heartbeat(
@@ -136,7 +139,8 @@ async def _maybe_backfill(sym: str):
 
     s2 = st_market(sym, "2m")
     try:
-        have_2m = r.xlen(s2) or 0
+        have_2m_raw: int = cast(int, r.xlen(s2) or 0)
+        have_2m = int(have_2m_raw)
     except Exception:
         have_2m = 0
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
-from typing import List, Optional, Sequence, cast
+from typing import Iterable, List, Optional, cast
 from uuid import UUID
 
 from sqlalchemy import insert, select, update, and_
@@ -74,18 +75,18 @@ def _to_domain(r: OrderStateRecord) -> OrderState:
         status=_coerce_order_status(r.status),
         side=_coerce_order_side(r.side),
         symbol=str(r.symbol),
-        trigger_price=Decimal(r.trigger_price),
-        stop_price=Decimal(r.stop_price),
-        quantity=Decimal(r.quantity),
-        filled_quantity=Decimal(getattr(r, "filled_quantity", 0) or 0),
+        trigger_price=Decimal(str(r.trigger_price)),
+        stop_price=Decimal(str(r.stop_price)),
+        quantity=Decimal(str(r.quantity)),
+        filled_quantity=Decimal(str(getattr(r, "filled_quantity", 0) or 0)),
         avg_fill_price=(
-            Decimal(r.avg_fill_price)
+            Decimal(str(r.avg_fill_price))
             if getattr(r, "avg_fill_price", None) is not None
             else None
         ),
         last_fill_at=getattr(r, "last_fill_at", None),
-        created_at=r.created_at,
-        updated_at=r.updated_at,
+        created_at=cast(datetime, r.created_at),
+        updated_at=cast(datetime, r.updated_at),
     )
 
 
@@ -131,7 +132,7 @@ class OrderGateway:
         bot_id: UUID,
         symbol: str,
         side: OrderSide,
-        statuses: Optional[Sequence[OrderStatus]] = None,
+        statuses: Optional[Iterable[OrderStatus]] = None,
     ) -> List[OrderState]:
         """
         Return active orders for (bot, symbol, side).
@@ -154,7 +155,7 @@ class OrderGateway:
 
     async def list_states_by_statuses(
         self,
-        statuses: Sequence[OrderStatus],
+        statuses: Iterable[OrderStatus],
     ) -> List[OrderState]:
         async with self._session_factory() as session:
             stmt = (
