@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import (
+    Any,
     AsyncIterator,
     Awaitable,
     Callable,
@@ -15,6 +16,7 @@ from typing import (
     Mapping,
     Optional,
     Tuple,
+    cast,
 )
 
 from redis.asyncio import Redis
@@ -276,7 +278,8 @@ class SignalStreamConsumer:
 
                 # redis-py xread expects: {stream_key: last_id, ...}
                 result = await self._redis.xread(
-                    streams=self._streams_last_id, block=self._block_ms
+                    streams=cast(Any, dict(self._streams_last_id)),
+                    block=self._block_ms,
                 )
                 # result: List[Tuple[stream_key, List[Tuple[msg_id, fields_dict]]]]
 
@@ -377,7 +380,7 @@ class SignalStreamConsumer:
                 result = await self._redis.xreadgroup(
                     groupname=self._group,
                     consumername=self._consumer,
-                    streams=streams,
+                    streams=cast(Any, streams),
                     block=self._block_ms,
                 )
                 if not result:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
-from typing import List
+from typing import Awaitable, List, cast
 
 from redis.asyncio import Redis
 
@@ -52,7 +52,7 @@ async def main_async() -> None:
 
     try:
         # Test Redis connection
-        await r.ping()
+        await cast(Awaitable[bool], r.ping())
         log.info("Redis connection established successfully")
     except Exception as e:
         log.error("Failed to connect to Redis | error=%s", e, exc_info=True)

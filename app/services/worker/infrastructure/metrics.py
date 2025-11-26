@@ -4,7 +4,7 @@ import logging
 from typing import Dict
 
 try:  # pragma: no cover - optional dependency
-    from prometheus_client import Counter  # type: ignore[reportMissingImports]
+    from prometheus_client import Counter
 except Exception:  # pragma: no cover - fallback when prometheus not installed
     Counter = None  # type: ignore[assignment]
 

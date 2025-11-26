@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "4c9fbbacdfc15d6fba48d26bf89766ef85fcacae898e75da2905571fc1c38083"
+            "sha256": "e7e1f7d68a3f382bd8a7bac863019b5c13fa8c11f802f35f10baf3cf161a5913"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -1410,6 +1410,15 @@
             "markers": "python_version >= '3.9'",
             "version": "==1.6.0"
         },
+        "prometheus-client": {
+            "hashes": [
+                "sha256:6ae8f9081eaaaf153a2e959d2e6c4f4fb57b12ef76c8c7980202f1e57b48b2ce",
+                "sha256:dd1913e6e76b59cfe44e7a4b83e01afc9873c1bdfd2ed8739f1e76aeca115f99"
+            ],
+            "index": "pypi",
+            "markers": "python_version >= '3.9'",
+            "version": "==0.23.1"
+        },
         "prompt-toolkit": {
             "hashes": [
                 "sha256:28cde192929c8e7321de85de1ddbe736f1375148b02f2e17edd840042b1be855",
@@ -2015,6 +2024,7 @@
                 "sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6",
                 "sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf"
             ],
+            "index": "pypi",
             "markers": "python_version >= '3.9'",
             "version": "==2.32.5"
         },

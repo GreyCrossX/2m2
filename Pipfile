@@ -22,9 +22,11 @@ pytest = "*"
 fakeredis = "*"
 pytest-asyncio = "*"
 pytest-timeout = "*"
-binance-common = ">=3.2.0"
-binance-sdk-derivatives-trading-usds-futures = ">=1.8.0"
 ruff = "*"
+requests = "*"
+prometheus-client = "*"
+binance-common = "*"
+binance-sdk-derivatives-trading-usds-futures = "*"
 
 [dev-packages]
 

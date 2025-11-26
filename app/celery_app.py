@@ -5,8 +5,8 @@ import os
 import logging
 from typing import Dict, Any
 
-from celery import Celery  # type: ignore[reportMissingImports]
-from kombu import Queue, Exchange  # type: ignore[reportMissingImports]
+from celery import Celery
+from kombu import Queue, Exchange
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("CELERY_LOG_LEVEL", "INFO").upper()
@@ -87,8 +87,8 @@ else:
     LOG.info("Beat schedule is disabled (set RECONCILE_SYMBOLS to enable).")
 
 # Import tasks so Celery registers them
-import app.services.tasks.handlers  # type: ignore[reportMissingImports]  # noqa: E402,F401
-import app.services.tasks.periodic  # type: ignore[reportMissingImports]  # noqa: E402,F401
+import app.services.tasks.handlers  # noqa: E402,F401
+import app.services.tasks.periodic  # noqa: E402,F401
 
 LOG.info(
     "Celery app initialized. Broker=%s Backend=%s TZ=%s",

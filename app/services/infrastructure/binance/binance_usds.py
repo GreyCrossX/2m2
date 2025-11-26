@@ -8,27 +8,22 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 import requests
-from binance_common import errors as binance_errors  # type: ignore[reportMissingImports]
-from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (  # type: ignore[reportMissingImports]
+from binance_common import errors as binance_errors
+from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
     ConfigurationRestAPI,
     DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL,
     DerivativesTradingUsdsFutures,
 )
-
-try:  # pragma: no cover - defensive import
-    from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (  # type: ignore[reportMissingImports]
-        DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL,
-    )
-except Exception:  # pragma: no cover
-    DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL = (
-        "https://testnet.binancefuture.com"
-    )
-
 from app.services.domain.exceptions import (
     DomainAuthError,
     DomainBadRequest,
     DomainExchangeDown,
     DomainRateLimit,
+)
+
+# NOTE: Some SDK builds omit the testnet constant; define it explicitly.
+DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL = (
+    "https://testnet.binancefuture.com"
 )
 
 logger = logging.getLogger("services.infrastructure.binance.binance_usds")

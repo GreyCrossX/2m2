@@ -1,5 +1,9 @@
 {
   "typeCheckingMode": "basic",
+  "venvPath": "C:\\Users\\mathi\\.virtualenvs",
+  "venv": "2m2-KsRk4Rij",
+  "pythonVersion": "3.13",
+  "stubPath": "typings",
   "reportMissingImports": "warning",
   "reportMissingTypeStubs": "warning",
   "exclude": [

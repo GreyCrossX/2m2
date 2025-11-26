@@ -42,7 +42,7 @@ async def _ping_redis(redis: Redis, *, retries: int = 60, delay: float = 1.0) ->
     """Verify Redis connectivity with retry logic for AOF loading scenarios."""
     for attempt in range(1, retries + 1):
         try:
-            pong = await redis.ping()
+            pong = await cast(Awaitable[bool], redis.ping())
             log.info("Redis ping OK (attempt %d/%d): %s", attempt, retries, pong)
             return
         except (

@@ -71,7 +71,7 @@ class StreamPublisher:
                     self.sym,
                     self.tf,
                     self._ind_count,
-            )
+                )
 
             return decoded_id
 

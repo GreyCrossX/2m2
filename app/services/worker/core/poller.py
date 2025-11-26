@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Dict, Optional, cast
+from typing import Any, Dict, MutableMapping, Optional, cast
 
 from redis.asyncio import Redis
 
@@ -128,8 +128,8 @@ class WorkerPoller:
     async def _process_signal(
         self,
         message: StreamMessage,
-        log_context: Dict[str, str],
-    ) -> Dict[str, str]:
+        log_context: MutableMapping[str, Any],
+    ) -> MutableMapping[str, Any]:
         """Parse the payload and invoke the appropriate SignalProcessor handler."""
         payload = cast(Dict[str, str], message.payload)
         msg_id = message.message_id
@@ -166,7 +166,7 @@ class WorkerPoller:
                 )
                 raise InvalidSignalException(f"Invalid ARM signal: {exc}") from exc
 
-            await self._sp.process_arm_signal(signal, msg_id, log_context)
+            await self._sp.process_arm_signal(signal, msg_id, dict(log_context))
             logger.debug("Processed ARM | %s", format_log_context(log_context))
             return log_context
 
@@ -193,7 +193,7 @@ class WorkerPoller:
                 )
                 raise InvalidSignalException(f"Invalid DISARM signal: {exc}") from exc
 
-            await self._sp.process_disarm_signal(signal, msg_id, log_context)
+            await self._sp.process_disarm_signal(signal, msg_id, dict(log_context))
             logger.debug("Processed DISARM | %s", format_log_context(log_context))
             return log_context
 
@@ -262,7 +262,7 @@ class WorkerPoller:
     # Logging helpers
     # ---------------------------------------------------------------------
 
-    def _build_log_context(self, message: StreamMessage) -> Dict[str, str]:
+    def _build_log_context(self, message: StreamMessage) -> MutableMapping[str, Any]:
         payload_type = str(message.payload.get("type", "")).lower()
         prev_side = str(message.payload.get("prev_side", "-") or "-")
         return {

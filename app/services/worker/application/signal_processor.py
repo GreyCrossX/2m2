@@ -86,7 +86,11 @@ class SignalProcessor:
             return []
 
         getter = getattr(self._positions, "get_positions", None)
-        positions_raw = getter(bot_id) if getter is not None else self._positions.get_position(bot_id)
+        positions_raw = (
+            getter(bot_id)
+            if getter is not None
+            else self._positions.get_position(bot_id)
+        )
 
         if inspect.isawaitable(positions_raw):  # type: ignore[truthy-bool]
             positions_res = await positions_raw  # type: ignore[misc]
