@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import os
 from typing import Dict, Tuple
 from uuid import UUID
 
@@ -75,6 +76,9 @@ def _setup_signal_handlers(stop_event: asyncio.Event) -> None:
 
 
 async def main_async() -> None:
+    if not os.getenv("CREDENTIALS_MASTER_KEY"):
+        raise RuntimeError("CREDENTIALS_MASTER_KEY is required to decrypt API credentials for the worker.")
+
     cfg = Config.from_env()
     setup_logging(cfg.log_level)
 
