@@ -98,7 +98,7 @@ class SignalGenerator:
         return DisarmSignal(
             v=self.version,
             type="disarm",
-            prev_side=prev_side,  # type: ignore[arg-type]
+            prev_side=prev_side,
             sym=sym,
             tf=tf,
             ts=now_ts,
@@ -116,7 +116,7 @@ class SignalGenerator:
         ind_ts: int,
         ind_high: Decimal,
         ind_low: Decimal,
-    ) -> List[object]:
+    ) -> List[ArmSignal | DisarmSignal]:
         prev = self._prev_regime
         logger.debug(
             "Evaluating signals | sym=%s ts=%d prev_regime=%s current_regime=%s",
@@ -126,7 +126,7 @@ class SignalGenerator:
             regime,
         )
 
-        out: List[object] = []
+        out: List[ArmSignal | DisarmSignal] = []
 
         # First data point: just initialize state
         if prev is None:

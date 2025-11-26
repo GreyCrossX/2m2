@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Mapping
+from typing import Any, Mapping, Awaitable, cast
 import logging
 from redis.asyncio import Redis
 
@@ -33,15 +33,21 @@ class StreamPublisher:
 
         try:
             # XADD with MAXLEN ~ to keep series bounded
-            msg_id = await self.r.xadd(
-                key,
-                {k: str(v) for k, v in payload.items()},
-                maxlen=self.maxlen_ind,
-                approximate=True,
+            msg_id = await cast(
+                Awaitable[Any],
+                self.r.xadd(
+                    key,
+                    {k: str(v) for k, v in payload.items()},
+                    maxlen=self.maxlen_ind,
+                    approximate=True,
+                ),
             )
 
             # Keep latest snapshot
-            await self.r.hset(snap, mapping={k: str(v) for k, v in payload.items()})
+            await cast(
+                Awaitable[Any],
+                self.r.hset(snap, mapping={k: str(v) for k, v in payload.items()}),
+            )
 
             self._ind_count += 1
             decoded_id = (
@@ -65,7 +71,7 @@ class StreamPublisher:
                     self.sym,
                     self.tf,
                     self._ind_count,
-                )
+            )
 
             return decoded_id
 
@@ -83,11 +89,14 @@ class StreamPublisher:
         key = st_signal(self.sym, self.tf)
 
         try:
-            msg_id = await self.r.xadd(
-                key,
-                {k: str(v) for k, v in payload.items()},
-                maxlen=self.maxlen_signal,
-                approximate=True,
+            msg_id = await cast(
+                Awaitable[Any],
+                self.r.xadd(
+                    key,
+                    {k: str(v) for k, v in payload.items()},
+                    maxlen=self.maxlen_signal,
+                    approximate=True,
+                ),
             )
 
             self._signal_count += 1

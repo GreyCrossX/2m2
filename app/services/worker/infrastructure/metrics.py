@@ -4,7 +4,7 @@ import logging
 from typing import Dict
 
 try:  # pragma: no cover - optional dependency
-    from prometheus_client import Counter
+    from prometheus_client import Counter  # type: ignore[reportMissingImports]
 except Exception:  # pragma: no cover - fallback when prometheus not installed
     Counter = None  # type: ignore[assignment]
 
@@ -18,6 +18,7 @@ class WorkerMetrics:
     def __init__(self) -> None:
         self._use_prom = Counter is not None
         if self._use_prom:
+            assert Counter is not None  # satisfy type checker
             self._signals_processed = Counter(
                 "signals_processed_total",
                 "Total worker signals processed",

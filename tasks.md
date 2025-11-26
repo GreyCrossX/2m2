@@ -14,3 +14,11 @@
 - [ ] Calc2 signal processor: type narrow signals (`ArmSignal`/`DisarmSignal`) instead of `object` to satisfy `.type`/`.to_stream_map` access.
 - [ ] Ingestor Redis helpers: fix synchronous Redis client typings (xadd/xlen/xrange returns Awaitable in stubs) and semicolon issues already fixed; add casts/ignores as needed.
 - [ ] Misc warnings: silence optional imports (prometheus_client, binance SDK, celery/kombu) with type: ignore or stub path; address health.py dict bool-set warnings; tidy remaining script typings if kept in scope.
+
+# Binance reliability hardening (API + SDK review)
+- [ ] Enforce request shapes per Binance futures docs before POST: LIMIT must send `timeInForce` + `price`; STOP/TAKE_PROFIT variants must send `stopPrice`; Hedge mode must send `positionSide`; `closePosition` only with STOP_MARKET/TAKE_PROFIT_MARKET; reject unknown `workingType`/`timeInForce`/`side`/`type` up front.
+- [ ] Normalize payload serialization to the SDK’s expected snake_case and stringified numerics: uppercase symbols/sides, stringify Decimal/float to avoid precision drift, coerce booleans to lowercase strings where Binance expects `"true"/"false"`, and drop `None` keys so signatures match server schema.
+- [ ] Add configurable `recvWindow` + timestamp/clock-drift guard on all signed endpoints; surface a clear error when local clock skew would invalidate signatures instead of letting the SDK throw opaque errors.
+- [ ] Harden exchangeInfo usage: cache + periodic refresh, detect missing `tickSize/stepSize` from SDK responses, and fall back to documented `pricePrecision/quantityPrecision` before we build orders.
+- [ ] Add a testnet conformance harness using `/fapi/v1/order/test` (and optional `batchOrders` <= 5) to validate trio payloads and min-notional handling without placing live orders; wire into CI as a smoke job guarded by env keys.
+- [ ] Expand error mapping/metrics: capture Binance error codes/messages in the Domain* exceptions, log redacted payload + base path, and export counters for specific classes (BadRequest, RateLimit, ExchangeDown, Forbidden) to spot formatting/rate issues quickly.

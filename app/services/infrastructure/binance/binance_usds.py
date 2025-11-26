@@ -8,15 +8,15 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 import requests
-from binance_common import errors as binance_errors
-from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
+from binance_common import errors as binance_errors  # type: ignore[reportMissingImports]
+from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (  # type: ignore[reportMissingImports]
     ConfigurationRestAPI,
     DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL,
     DerivativesTradingUsdsFutures,
 )
 
 try:  # pragma: no cover - defensive import
-    from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
+    from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (  # type: ignore[reportMissingImports]
         DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL,
     )
 except Exception:  # pragma: no cover
@@ -102,7 +102,10 @@ class BinanceUSDS:
                     timeout=config.timeout_ms,
                 )
                 _client = DerivativesTradingUsdsFutures(config_rest_api=configuration)
-            self._rest = _client.rest_api
+            rest_api = getattr(_client, "rest_api", None)
+            if rest_api is None:
+                raise ValueError("BinanceUSDS failed to initialize REST API client")
+            self._rest = rest_api
 
         self._timeout_ms = config.timeout_ms
         self._base_path = base_path

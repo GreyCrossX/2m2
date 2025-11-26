@@ -111,7 +111,7 @@ class IndicatorState:
 class ArmSignal:
     v: str
     type: SignalType
-    side: Regime
+    side: Literal["long", "short"]
     sym: str
     tf: str
     ts: int

@@ -34,7 +34,7 @@ class OrderSide(str, Enum):
         return self.value
 
     @classmethod
-    def from_value(cls, value: str | "OrderSide" | "SideWhitelist") -> "OrderSide":
+    def from_value(cls, value: str | OrderSide | "SideWhitelist") -> "OrderSide":
         if isinstance(value, OrderSide):
             return value
         try:

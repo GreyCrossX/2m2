@@ -268,7 +268,7 @@ class BinanceOrderMonitor:
 
         try:
             allow_pyramiding = getattr(bot, "allow_pyramiding", False)
-            position = await self._positions.open_position(
+            await self._positions.open_position(
                 bot.id,
                 state,
                 allow_pyramiding=allow_pyramiding,
@@ -276,7 +276,7 @@ class BinanceOrderMonitor:
             if state.status == OrderStatus.FILLED:
                 state.mark(OrderStatus.ARMED)
                 await self._orders.save_state(state)
-            return position
+            return None
         except WorkerException as exc:
             log.warning("Failed to rehydrate position | bot_id=%s err=%s", bot.id, exc)
             return None

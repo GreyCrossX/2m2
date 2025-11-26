@@ -15,6 +15,12 @@ worker locally:
 For testnet smoke testing you will also need to export the key/secret pair above
 and set `BINANCE_TESTNET=true`.
 
+## Binance API/SKD guardrails (docs review)
+- Futures new orders require specific combos: LIMIT needs `price` + `timeInForce`; STOP/TAKE_PROFIT variants need `stopPrice`; Hedge mode must send `positionSide`; `closePosition` is only valid with STOP_MARKET/TAKE_PROFIT_MARKET; `batchOrders` is capped at 5 (doc: Binance Futures Connector Python).
+- Keep payloads uppercase and stringified: `symbol/side/type/timeInForce/positionSide` uppercase, Decimals as strings, booleans as `"true"/"false"` where Binance expects them, and drop `None` fields so the SDK signs the exact server schema.
+- Respect `recvWindow` (<= 60000) and ensure local clock skew is small; if skewed, sync before calling signed endpoints or surface a clear error instead of letting the SDK time out.
+- Use `/fapi/v1/order/test` for payload validation (no execution) and prefer `newOrderRespType=RESULT` while hardening so we can assert the server parsed the fields we sent.
+
 ## Installing Dependencies
 
 ```bash

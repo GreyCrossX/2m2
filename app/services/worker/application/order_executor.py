@@ -295,14 +295,12 @@ class OrderExecutor:
         max_qty = _to_decimal(lot.get("maxQty"))
         meta = filters.get("META", {}) or {}
         qty_precision: int | None = None
-        try:
-            qty_precision = (
-                int(meta.get("quantityPrecision"))
-                if meta.get("quantityPrecision") is not None
-                else None
-            )
-        except (TypeError, ValueError):
-            qty_precision = None
+        qp_raw = meta.get("quantityPrecision")
+        if qp_raw is not None:
+            try:
+                qty_precision = int(qp_raw)
+            except (TypeError, ValueError):
+                qty_precision = None
 
         q_qty = _floor_to_step(raw_qty, step, qty_precision)
 

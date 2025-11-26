@@ -86,23 +86,20 @@ class SignalProcessor:
             return []
 
         getter = getattr(self._positions, "get_positions", None)
-        positions: Iterable[Position] | Position | None
+        positions_raw = getter(bot_id) if getter is not None else self._positions.get_position(bot_id)
 
-        if getter is not None:
-            positions = getter(bot_id)
+        if inspect.isawaitable(positions_raw):  # type: ignore[truthy-bool]
+            positions_res = await positions_raw  # type: ignore[misc]
         else:
-            positions = self._positions.get_position(bot_id)
+            positions_res = positions_raw
 
-        if inspect.isawaitable(positions):  # type: ignore[truthy-bool]
-            positions = await positions  # type: ignore[misc]
-
-        if positions is None:
+        if positions_res is None:
             return []
 
-        if isinstance(positions, Position):
-            return [positions]
+        if isinstance(positions_res, Position):
+            return [positions_res]
 
-        return list(positions)
+        return list(positions_res)
 
     async def process_arm_signal(
         self,

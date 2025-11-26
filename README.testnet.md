@@ -27,3 +27,8 @@ $ python -m app.scripts.smoke_order
 ```
 
 The script will place a limit order using the configured credentials, fetch the status, and cancel it to keep the account clean.
+
+## Payload conformance tips (from Binance futures docs)
+- `/fapi/v1/order/test` echoes validation errors without placing trades; use it to verify field names/casing (`symbol/side/type/timeInForce` uppercase, `stopPrice` required on STOP/TP orders, `positionSide` required in Hedge mode).
+- Keep `recvWindow` under 60000 and make sure the local clock is in sync; otherwise the testnet will reject signatures before hitting the gateway.
+- `batchOrders` is capped at 5 orders; include only the fields Binance accepts (drop `None` keys) so signatures match.

@@ -36,7 +36,7 @@ async def readiness_db(db: AsyncSession = Depends(get_db)):
         )
 
     # Migrations (soft)
-    mig = {"present": None, "version": None}
+    mig: dict[str, object | None] = {"present": None, "version": None}
     try:
         v = await db.execute(text("select version_num from alembic_version limit 1"))
         mig["present"] = True

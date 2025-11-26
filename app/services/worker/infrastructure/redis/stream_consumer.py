@@ -82,7 +82,7 @@ class SignalStreamConsumer:
 
         # Internal state:
         # XREAD: stream_key -> last_id
-        self._streams_last_id: Dict[str | bytes, str] = {}
+        self._streams_last_id: Dict[str, str] = {}
         # Calculated stream keys
         self._stream_keys: List[str] = [
             stream_signal(sym, self._tf) for sym in self._symbols
@@ -215,12 +215,8 @@ class SignalStreamConsumer:
                     last_id = "$" if self._start_from_latest else "0-0"
                     logger.info("  %s: starting from %s", sk, last_id)
 
-                # Convert to bytes if Redis is not decoding responses
-                if not getattr(self._redis, "decode_responses", True):
-                    logger.debug("Converting stream key to bytes: %s", sk)
-                    self._streams_last_id[sk.encode()] = last_id.encode()
-                else:
-                    self._streams_last_id[sk] = last_id
+                # Always store offsets as strings for typing consistency
+                self._streams_last_id[str(sk)] = str(last_id)
 
             logger.info("Stream offset initialization complete")
             logger.debug("Initialized streams_last_id: %s", dict(self._streams_last_id))
@@ -601,7 +597,7 @@ class SignalStreamConsumer:
     def _update_last_id(self, stream_key: str | bytes, msg_id: str) -> None:
         key = (
             stream_key
-            if stream_key in self._streams_last_id
+            if isinstance(stream_key, str) and stream_key in self._streams_last_id
             else self._normalize_stream_key(stream_key)
         )
         self._streams_last_id[key] = msg_id
