@@ -26,6 +26,9 @@ from app.services.infrastructure.binance import (
     BinanceClient,
     BinanceTrading,
 )
+from app.services.infrastructure.binance.binance_trading import (
+    TradingPort as BinanceTradingPort,
+)
 from .infrastructure.cache.balance_cache import BalanceCache
 from .infrastructure.metrics import WorkerMetrics
 from .infrastructure.postgres.order_states import OrderGateway
@@ -179,7 +182,7 @@ async def main_async() -> None:
 
     async def trading_factory(
         bot_cfg: BotConfig,
-    ) -> BinanceTrading | DryRunTradingAdapter:
+    ) -> BinanceTradingPort | DryRunTradingAdapter:
         log.debug(
             "Creating trading adapter | bot_id=%s symbol=%s", bot_cfg.id, bot_cfg.symbol
         )

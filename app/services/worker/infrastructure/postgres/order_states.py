@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, cast
 from uuid import UUID
 
 from sqlalchemy import insert, select, update, and_
@@ -65,15 +65,15 @@ def _to_domain(r: OrderStateRecord) -> OrderState:
     Accept both DB enum objects and plain strings.
     """
     return OrderState(
-        id=r.id,
-        bot_id=r.bot_id,
-        signal_id=r.signal_id,
-        order_id=r.order_id,
-        stop_order_id=r.stop_order_id,
-        take_profit_order_id=r.take_profit_order_id,
+        id=cast(UUID, r.id),
+        bot_id=cast(UUID, r.bot_id),
+        signal_id=str(r.signal_id),
+        order_id=cast(Optional[int], r.order_id),
+        stop_order_id=cast(Optional[int], r.stop_order_id),
+        take_profit_order_id=cast(Optional[int], r.take_profit_order_id),
         status=_coerce_order_status(r.status),
         side=_coerce_order_side(r.side),
-        symbol=r.symbol,
+        symbol=str(r.symbol),
         trigger_price=Decimal(r.trigger_price),
         stop_price=Decimal(r.stop_price),
         quantity=Decimal(r.quantity),

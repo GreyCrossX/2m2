@@ -27,9 +27,9 @@ class BalanceCache:
             return None
         return value
 
-    async def set(self, cred_id: UUID, env: str, balance: Decimal) -> None:
+    async def set(self, cred_id: UUID, env: str, value: Decimal) -> None:
         key = (cred_id, env)
-        self._cache[key] = (balance, time.time())
+        self._cache[key] = (value, time.time())
 
     async def invalidate(self, cred_id: UUID, env: str) -> None:
         self._cache.pop((cred_id, env), None)

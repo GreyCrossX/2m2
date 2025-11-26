@@ -1,0 +1,10 @@
+{
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "warning",
+  "exclude": [
+    "alembic",
+    "app/scripts",
+    "tests"
+  ]
+}

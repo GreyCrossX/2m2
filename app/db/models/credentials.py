@@ -46,6 +46,6 @@ class ApiCredential(Base):
     def get_decrypted(self) -> tuple[str, str]:
         """Return (api_key, api_secret) decrypted for in-memory use only."""
         return (
-            decrypt_secret(self.api_key_encrypted),
-            decrypt_secret(self.api_secret_encrypted),
+            decrypt_secret(str(self.api_key_encrypted)),
+            decrypt_secret(str(self.api_secret_encrypted)),
         )

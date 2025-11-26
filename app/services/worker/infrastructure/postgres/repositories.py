@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -48,9 +48,9 @@ def _to_bot_config(row: ORMBot) -> BotConfig:
       - Decimals preserved (0 fallback when None)
     """
     return BotConfig(
-        id=row.id,
-        user_id=row.user_id,
-        cred_id=row.cred_id,
+        id=cast(UUID, row.id),
+        user_id=cast(UUID, row.user_id),
+        cred_id=cast(UUID, row.cred_id),
         symbol=(row.symbol or "").upper(),
         timeframe=row.timeframe,
         enabled=bool(row.enabled),

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Path, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Path, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,7 +65,7 @@ async def create_bot(
         )
 
     bot = Bot(
-        user_id=me.id,
+        user_id=cast(UUID, me.id),
         cred_id=payload.cred_id,
         symbol=payload.symbol.upper(),
         timeframe=payload.timeframe,
@@ -88,11 +88,11 @@ async def create_bot(
 @router.patch("/{bot_id}", response_model=BotOut)
 async def update_bot(
     bot_id: UUID = Path(...),
-    payload: BotUpdate = ...,
+    payload: BotUpdate = Body(...),
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    bot = await _get_bot_for_user(db, bot_id, me.id)
+    bot = await _get_bot_for_user(db, bot_id, cast(UUID, me.id))
     if not bot:
         raise HTTPException(status_code=404, detail="Bot not found.")
 
@@ -114,7 +114,7 @@ async def delete_bot(
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    bot = await _get_bot_for_user(db, bot_id, me.id)
+    bot = await _get_bot_for_user(db, bot_id, cast(UUID, me.id))
     if not bot:
         return
     await db.delete(bot)

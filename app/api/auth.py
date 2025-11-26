@@ -52,7 +52,7 @@ async def signup(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     await db.refresh(new_user)
 
     # Issue JWT
-    access_token = create_access_token(subject=new_user.email)
+    access_token = create_access_token(subject=str(new_user.email))
     return {"access_token": access_token, "token_type": "bearer"}
 
 
@@ -73,8 +73,8 @@ async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
     if not user:
         raise invalid_exc
 
-    if not verify_password(user_data.password, user.hashed_pw):
+    if not verify_password(user_data.password, str(user.hashed_pw)):
         raise invalid_exc
 
-    access_token = create_access_token(subject=user.email)
+    access_token = create_access_token(subject=str(user.email))
     return {"access_token": access_token, "token_type": "bearer"}
