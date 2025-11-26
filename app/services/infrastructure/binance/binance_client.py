@@ -105,8 +105,10 @@ class BinanceClient:
 
             # Ensure we have fresh exchange info (refresh if stale)
             info = self._exchange_info
-            if info is None or not self._exchange_info_fetched_at or (
-                now - self._exchange_info_fetched_at >= self._exchange_info_ttl
+            if (
+                info is None
+                or not self._exchange_info_fetched_at
+                or (now - self._exchange_info_fetched_at >= self._exchange_info_ttl)
             ):
                 info = await self.exchange_info()
 
@@ -239,7 +241,7 @@ class BinanceClient:
             ):
                 raise DomainBadRequest(
                     f"Local clock skew too large ({skew}ms) for recvWindow {self._recv_window_ms}ms"
-        )
+                )
         return merged
 
     async def _enforce_min_notional(self, payload: Mapping[str, Any]) -> None:
@@ -261,9 +263,13 @@ class BinanceClient:
             return
         filters = await self._get_symbol_filters(str(sym))
         mn = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL") or {}
-        mn_val = mn.get("notional") or mn.get("minNotional") or mn.get("minNotionalValue")
+        mn_val = (
+            mn.get("notional") or mn.get("minNotional") or mn.get("minNotionalValue")
+        )
         try:
-            min_notional = Decimal(str(mn_val)) if mn_val not in (None, "", "0") else Decimal("0")
+            min_notional = (
+                Decimal(str(mn_val)) if mn_val not in (None, "", "0") else Decimal("0")
+            )
         except Exception:
             min_notional = Decimal("0")
         notional = q_qty * q_price
@@ -272,7 +278,9 @@ class BinanceClient:
                 f"Position size too small: notional {notional} < min {min_notional} for {sym}"
             )
 
-    def _log_and_raise(self, action: str, payload: Mapping[str, Any], exc: Exception) -> NoReturn:
+    def _log_and_raise(
+        self, action: str, payload: Mapping[str, Any], exc: Exception
+    ) -> NoReturn:
         logger.warning(
             "binance_%s_failed base=%s payload=%s err=%s",
             action,

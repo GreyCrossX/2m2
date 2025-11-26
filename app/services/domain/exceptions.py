@@ -16,7 +16,11 @@ class DomainExchangeError(DomainError):
         self.message = message
 
     def __str__(self) -> str:  # pragma: no cover - trivial
-        return f"{self.message} (code={self.code})" if self.code is not None else self.message
+        return (
+            f"{self.message} (code={self.code})"
+            if self.code is not None
+            else self.message
+        )
 
 
 class DomainBadRequest(DomainExchangeError):

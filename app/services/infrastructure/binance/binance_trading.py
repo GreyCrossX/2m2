@@ -17,7 +17,7 @@ _VALID_ORDER_TYPES = {
     "MARKET",
     "STOP_MARKET",
     "TAKE_PROFIT_MARKET",
-    "TAKE_PROFIT_LIMIT",
+    "TAKE_PROFIT",  # futures TP with price + stopPrice
 }
 _VALID_TIME_IN_FORCE = {"GTC", "IOC", "FOK", "GTX"}
 _VALID_POSITION_SIDES = {"BOTH", "LONG", "SHORT"}
@@ -387,8 +387,8 @@ class BinanceTrading:
         new_client_order_id: str | None = None,
     ) -> Dict[str, Any]:
         """
-        Futures TAKE_PROFIT_LIMIT:
-          - type="TAKE_PROFIT_LIMIT"
+        Futures TAKE_PROFIT (limit-style):
+          - type="TAKE_PROFIT"
           - price      = limit price (quantized)
           - stopPrice  = trigger (quantized)
           - timeInForce= GTC by default
@@ -415,19 +415,19 @@ class BinanceTrading:
         # Quantize qty & price, then final clamp on qty; quantize stop separately
         q_qty, q_price = await self.quantize_limit_order(sym, quantity, price)
         if q_qty <= 0 or q_price is None or q_price <= 0:
-            raise DomainBadRequest("Quantized qty/price invalid for TAKE_PROFIT_LIMIT")
+            raise DomainBadRequest("Quantized qty/price invalid for TAKE_PROFIT")
         q_qty = _final_qty_clamp(filters, q_qty)
         if q_qty <= 0:
             raise DomainBadRequest("Quantity below minimum after final clamp")
 
         q_stop = await self._quantize_price_only(sym, stop_price)
         if q_stop <= 0:
-            raise DomainBadRequest("Quantized stopPrice invalid for TAKE_PROFIT_LIMIT")
+            raise DomainBadRequest("Quantized stopPrice invalid for TAKE_PROFIT")
 
         payload: Dict[str, Any] = {
             "symbol": sym,
             "side": side_str,
-            "type": "TAKE_PROFIT_LIMIT",
+            "type": "TAKE_PROFIT",
             "quantity": q_qty,
             "price": q_price,
             "stopPrice": q_stop,

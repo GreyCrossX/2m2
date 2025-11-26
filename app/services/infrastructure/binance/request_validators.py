@@ -8,6 +8,7 @@ _VALID_TYPES = {
     "MARKET",
     "STOP_MARKET",
     "TAKE_PROFIT_MARKET",
+    "TAKE_PROFIT",
     "TAKE_PROFIT_LIMIT",
 }
 _VALID_TIF = {"GTC", "IOC", "FOK", "GTX"}
@@ -73,7 +74,7 @@ def validate_new_order_payload(params: Mapping[str, Any]) -> Dict[str, Any]:
         _require(payload, "timeInForce")
     elif order_type in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}:
         _require(payload, "stopPrice")
-    elif order_type == "TAKE_PROFIT_LIMIT":
+    elif order_type in {"TAKE_PROFIT", "TAKE_PROFIT_LIMIT"}:
         _require(payload, "price")
         _require(payload, "stopPrice")
         _require(payload, "timeInForce")
@@ -101,7 +102,9 @@ def validate_query_or_cancel_payload(params: Mapping[str, Any]) -> Dict[str, Any
     """
     payload: Dict[str, Any] = dict(params)
     if not payload.get("symbol"):
-        raise ValueError("Missing required field 'symbol' for Binance order query/cancel")
+        raise ValueError(
+            "Missing required field 'symbol' for Binance order query/cancel"
+        )
     payload["symbol"] = _upper_if_str(payload["symbol"])
 
     if (
@@ -109,6 +112,8 @@ def validate_query_or_cancel_payload(params: Mapping[str, Any]) -> Dict[str, Any
         and not payload.get("origClientOrderId")
         and payload.get("type") != "open_orders"
     ):
-        raise ValueError("Provide orderId or origClientOrderId for Binance order query/cancel")
+        raise ValueError(
+            "Provide orderId or origClientOrderId for Binance order query/cancel"
+        )
 
     return {k: v for k, v in payload.items() if v is not None}

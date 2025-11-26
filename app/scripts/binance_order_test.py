@@ -27,16 +27,28 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Binance /fapi/v1/order/test helper")
     parser.add_argument("--symbol", required=True, help="Symbol, e.g. BTCUSDT")
     parser.add_argument("--side", required=True, help="BUY or SELL")
-    parser.add_argument("--type", required=True, help="LIMIT, MARKET, STOP_MARKET, TAKE_PROFIT_MARKET, TAKE_PROFIT_LIMIT")
-    parser.add_argument("--qty", required=True, type=Decimal, help="Quantity (base asset)")
+    parser.add_argument(
+        "--type",
+        required=True,
+        help="LIMIT, MARKET, STOP_MARKET, TAKE_PROFIT_MARKET, TAKE_PROFIT_LIMIT",
+    )
+    parser.add_argument(
+        "--qty", required=True, type=Decimal, help="Quantity (base asset)"
+    )
     parser.add_argument("--price", type=Decimal, help="Price (LIMIT/TP_LIMIT)")
     parser.add_argument("--stopPrice", type=Decimal, help="Stop price (STOP/TP)")
     parser.add_argument("--timeInForce", help="GTC/IOC/FOK/GTX")
     parser.add_argument("--positionSide", help="BOTH/LONG/SHORT (hedge mode)")
     parser.add_argument("--workingType", help="CONTRACT_PRICE/MARK_PRICE")
     parser.add_argument("--reduceOnly", action="store_true", help="Set reduceOnly=true")
-    parser.add_argument("--closePosition", action="store_true", help="Set closePosition=true (STOP/TP market only)")
-    parser.add_argument("--recvWindow", type=int, default=5000, help="recvWindow ms (default 5000)")
+    parser.add_argument(
+        "--closePosition",
+        action="store_true",
+        help="Set closePosition=true (STOP/TP market only)",
+    )
+    parser.add_argument(
+        "--recvWindow", type=int, default=5000, help="recvWindow ms (default 5000)"
+    )
     args = parser.parse_args()
 
     api_key = os.getenv("BINANCE_API_KEY")
