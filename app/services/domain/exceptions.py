@@ -10,6 +10,14 @@ class DomainError(Exception):
 class DomainExchangeError(DomainError):
     """Base class for normalized exchange failures."""
 
+    def __init__(self, message: str, *, code: int | str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.message} (code={self.code})" if self.code is not None else self.message
+
 
 class DomainBadRequest(DomainExchangeError):
     """The exchange rejected the request due to invalid parameters."""

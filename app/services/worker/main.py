@@ -234,8 +234,6 @@ async def main_async() -> None:
     )
     log.info("Signal stream consumer created")
 
-    metrics = WorkerMetrics()
-
     log.info(
         "Creating worker poller (router refresh: %ds)...", cfg.router_refresh_seconds
     )

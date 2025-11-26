@@ -84,10 +84,21 @@ def upsert_cred(session, user, label="default", env="testnet"):
     if c:
         return c
 
-    k = os.getenv("TESTNET_API_KEY") or ""
-    s = os.getenv("TESTNET_API_SECRET") or os.getenv("TESTNET_SECRET") or ""
+    k = (
+        os.getenv("BINANCE_TESTNET_API")
+        or os.getenv("TESTNET_API_KEY")
+        or os.getenv("BINANCE_API_KEY")
+        or ""
+    )
+    s = (
+        os.getenv("BINANCE_TESTNET_SECRET")
+        or os.getenv("TESTNET_API_SECRET")
+        or os.getenv("TESTNET_SECRET")
+        or os.getenv("BINANCE_API_SECRET")
+        or ""
+    )
     if not k or not s:
-        raise SystemExit("TESTNET_API_KEY / TESTNET_API_SECRET missing in env")
+        raise SystemExit("BINANCE_TESTNET_API / BINANCE_TESTNET_SECRET missing in env")
 
     c = ApiCredential(
         user_id=user.id,

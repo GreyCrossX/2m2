@@ -144,6 +144,14 @@ class BinanceUSDS:
     # Error mapping & retries
     # ------------------------------------------------------------------
     def _map_exception(self, exc: Exception) -> Exception:
+        def _code(e: Exception) -> int | str | None:
+            return getattr(e, "code", None) or getattr(e, "status_code", None)
+
+        def _detail(e: Exception) -> str:
+            msg = getattr(e, "message", None) or str(e)
+            c = _code(e)
+            return f"{msg} (code={c})" if c is not None else msg
+
         if isinstance(
             exc,
             (
@@ -152,11 +160,11 @@ class BinanceUSDS:
                 binance_errors.ClientError,
             ),
         ):
-            return DomainBadRequest(str(exc))
+            return DomainBadRequest(_detail(exc), code=_code(exc))
         if isinstance(
             exc, (binance_errors.UnauthorizedError, binance_errors.ForbiddenError)
         ):
-            return DomainAuthError(str(exc))
+            return DomainAuthError(_detail(exc), code=_code(exc))
         if isinstance(
             exc,
             (
@@ -164,7 +172,7 @@ class BinanceUSDS:
                 binance_errors.RateLimitBanError,
             ),
         ):
-            return DomainRateLimit(str(exc))
+            return DomainRateLimit(_detail(exc), code=_code(exc))
         if isinstance(
             exc,
             (
@@ -172,7 +180,7 @@ class BinanceUSDS:
                 binance_errors.NetworkError,
             ),
         ):
-            return DomainExchangeDown(str(exc))
+            return DomainExchangeDown(_detail(exc), code=_code(exc))
         if isinstance(exc, requests.exceptions.ProxyError):
             return DomainExchangeDown("Proxy error communicating with Binance")
         if isinstance(exc, (requests.exceptions.Timeout, TimeoutError)):

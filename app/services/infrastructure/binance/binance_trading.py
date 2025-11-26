@@ -401,10 +401,14 @@ class BinanceTrading:
             working_type = _validate_choice(
                 working_type, _VALID_WORKING_TYPES, "working_type"
             )
+        else:
+            working_type = "CONTRACT_PRICE"
         if position_side:
             position_side = _validate_choice(
                 position_side, _VALID_POSITION_SIDES, "position_side"
             )
+        else:
+            position_side = "BOTH"
 
         filters = await self.get_symbol_filters(sym)
 
@@ -429,11 +433,9 @@ class BinanceTrading:
             "stopPrice": q_stop,
             "timeInForce": tif,
             "reduceOnly": bool(reduce_only),
+            "workingType": working_type,
+            "positionSide": position_side,
         }
-        if working_type:
-            payload["workingType"] = working_type
-        if position_side:
-            payload["positionSide"] = position_side
         if new_client_order_id:
             payload["newClientOrderId"] = new_client_order_id
 

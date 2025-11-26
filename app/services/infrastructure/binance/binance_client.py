@@ -4,17 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from decimal import Decimal
+import time
+from decimal import Decimal, InvalidOperation
 from functools import partial
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Callable, Dict, Mapping, NoReturn, Tuple
 
 from app.services.domain.exceptions import DomainBadRequest
+from .request_validators import (
+    validate_new_order_payload,
+    validate_query_or_cancel_payload,
+)
 from .binance_usds import BinanceUSDS, BinanceUSDSConfig
 from .utils.filters import build_symbol_filters, quantize_price, quantize_qty
 
 logger = logging.getLogger("services.infrastructure.binance.binance_client")
 
 _REDACT_KEYS = {"timestamp", "signature", "recvWindow"}
+_BOOL_FIELDS = {"reduceOnly", "closePosition", "priceProtect"}
+_UPPER_FIELDS = {"symbol", "side", "type", "timeInForce", "positionSide", "workingType"}
+
+DEFAULT_RECV_WINDOW_MS = 5_000
+DEFAULT_MAX_CLOCK_SKEW_MS = 1_000
 
 
 class BinanceClient:
@@ -31,6 +41,9 @@ class BinanceClient:
         max_retries: int = 3,
         backoff_factor: float = 0.5,
         call_timeout: float = 10.0,
+        recv_window_ms: int = DEFAULT_RECV_WINDOW_MS,
+        max_clock_skew_ms: int = DEFAULT_MAX_CLOCK_SKEW_MS,
+        timestamp_provider: Callable[[], int] | None = None,
     ) -> None:
         if not api_key or not api_secret:
             raise ValueError("API key and secret are required")
@@ -45,11 +58,18 @@ class BinanceClient:
         )
         self._gateway = gateway or BinanceUSDS(self._config)
         self._call_timeout = float(call_timeout)
+        self._recv_window_ms = min(max(1, int(recv_window_ms)), 60_000)
+        self._max_clock_skew_ms = max(0, int(max_clock_skew_ms))
+        self._timestamp_provider = timestamp_provider or (
+            lambda: int(time.time() * 1000)
+        )
 
         # Cached exchange info + per-symbol filters
         self._filters_lock = asyncio.Lock()
         self._filters: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._exchange_info: Dict[str, Any] | None = None
+        self._exchange_info_fetched_at: float | None = None
+        self._exchange_info_ttl = 300.0
 
     # ---------------------------
     # Low-level async call helper
@@ -67,18 +87,28 @@ class BinanceClient:
         """Fetch exchange information and cache it for later filter lookups."""
         info: dict = await self._call(self._gateway.exchange_information)
         self._exchange_info = info
+        self._exchange_info_fetched_at = time.time()
         return info
 
     async def _get_symbol_filters(self, symbol: str) -> Dict[str, Dict[str, Any]]:
         """Return symbol filters (LOT_SIZE, PRICE_FILTER, NOTIONAL/MIN_NOTIONAL, ...), cached."""
         sym = symbol.upper()
         async with self._filters_lock:
-            # Fast path: already cached
-            if sym in self._filters:
+            now = time.time()
+            # Fast path: already cached and not stale
+            if (
+                sym in self._filters
+                and self._exchange_info_fetched_at
+                and now - self._exchange_info_fetched_at < self._exchange_info_ttl
+            ):
                 return self._filters[sym]
 
-            # Ensure we have fresh exchange info
-            info = self._exchange_info or await self.exchange_info()
+            # Ensure we have fresh exchange info (refresh if stale)
+            info = self._exchange_info
+            if info is None or not self._exchange_info_fetched_at or (
+                now - self._exchange_info_fetched_at >= self._exchange_info_ttl
+            ):
+                info = await self.exchange_info()
 
             # Build (or rebuild) the full map and cache it
             filters_map = build_symbol_filters(info)
@@ -94,6 +124,14 @@ class BinanceClient:
 
             if symbol_filters is None:
                 raise DomainBadRequest(f"Symbol {sym} not present in exchange info")
+
+            pf = symbol_filters.get("PRICE_FILTER", {})
+            lot = symbol_filters.get("LOT_SIZE", {})
+            if not pf.get("tickSize") or not lot.get("stepSize"):
+                logger.warning(
+                    "Missing tickSize/stepSize for %s; falling back to precision",
+                    sym,
+                )
 
             return symbol_filters
 
@@ -155,15 +193,21 @@ class BinanceClient:
     # ---------------------------
     @staticmethod
     def _prepare_payload(params: Mapping[str, Any]) -> Dict[str, Any]:
-        """Uppercase symbol; stringify Decimals; leave other types as-is."""
+        """
+        Uppercase enum-ish fields; stringify Decimals; coerce bools to Binance-friendly strings; drop None.
+        """
         if not params:
             return {}
         payload: Dict[str, Any] = {}
         for key, value in params.items():
-            if key == "symbol" and isinstance(value, str):
+            if value is None:
+                continue
+            if key in _UPPER_FIELDS and isinstance(value, str):
                 payload[key] = value.upper()
             elif isinstance(value, Decimal):
                 payload[key] = str(value)
+            elif isinstance(value, bool) and key in _BOOL_FIELDS:
+                payload[key] = "true" if value else "false"
             else:
                 payload[key] = value
         return payload
@@ -175,41 +219,146 @@ class BinanceClient:
             redacted[key] = "***" if key in _REDACT_KEYS else value
         return redacted
 
+    def _attach_timing(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Ensure recvWindow is present; if caller provided timestamp, guard against skew.
+        """
+        merged = dict(payload)
+        merged.setdefault("recvWindow", self._recv_window_ms)
+        if "timestamp" in merged:
+            ts = merged.get("timestamp")
+            now_ms = self._timestamp_provider()
+            try:
+                ts_int = int(ts) if ts is not None else now_ms
+            except Exception as exc:  # noqa: BLE001
+                raise DomainBadRequest(f"Invalid timestamp '{ts}'") from exc
+
+            skew = abs(now_ms - ts_int)
+            if self._max_clock_skew_ms and skew > (
+                self._recv_window_ms + self._max_clock_skew_ms
+            ):
+                raise DomainBadRequest(
+                    f"Local clock skew too large ({skew}ms) for recvWindow {self._recv_window_ms}ms"
+        )
+        return merged
+
+    async def _enforce_min_notional(self, payload: Mapping[str, Any]) -> None:
+        """
+        Pre-flight check: for priced orders with quantity present, ensure qty*price meets minNotional.
+        Skip when price is absent (e.g., MARKET/STOP_MARKET).
+        """
+        sym = payload.get("symbol")
+        price = payload.get("price")
+        qty = payload.get("quantity")
+        if sym is None or price is None or qty is None:
+            return
+        try:
+            q_price = Decimal(str(price))
+            q_qty = Decimal(str(qty))
+        except (InvalidOperation, TypeError, ValueError):
+            return
+        if q_price <= 0 or q_qty <= 0:
+            return
+        filters = await self._get_symbol_filters(str(sym))
+        mn = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL") or {}
+        mn_val = mn.get("notional") or mn.get("minNotional") or mn.get("minNotionalValue")
+        try:
+            min_notional = Decimal(str(mn_val)) if mn_val not in (None, "", "0") else Decimal("0")
+        except Exception:
+            min_notional = Decimal("0")
+        notional = q_qty * q_price
+        if min_notional > 0 and notional < min_notional:
+            raise DomainBadRequest(
+                f"Position size too small: notional {notional} < min {min_notional} for {sym}"
+            )
+
+    def _log_and_raise(self, action: str, payload: Mapping[str, Any], exc: Exception) -> NoReturn:
+        logger.warning(
+            "binance_%s_failed base=%s payload=%s err=%s",
+            action,
+            self._gateway.base_path,
+            self._redact_payload(payload),
+            exc,
+        )
+        raise exc
+
     # ---------------------------
     # Order endpoints
     # ---------------------------
     async def new_order(self, **params: Any) -> dict:
         """Submit a new order with payload normalization/logging."""
-        payload = self._prepare_payload(params)
+        # Inject recvWindow if caller did not provide
+        merged = self._attach_timing(dict(params))
+        validated = validate_new_order_payload(merged)
+        await self._enforce_min_notional(validated)
+        payload = self._prepare_payload(validated)
         logger.debug(
             "binance_new_order", extra={"payload": self._redact_payload(payload)}
         )
-        return await self._call(self._gateway.new_order, **payload)
+        try:
+            return await self._call(self._gateway.new_order, **payload)
+        except Exception as exc:
+            self._log_and_raise("new_order", payload, exc)
 
     async def query_order(self, **params: Any) -> dict:
         """Query order status from Binance."""
-        payload = self._prepare_payload(params)
+        validated = validate_query_or_cancel_payload(self._attach_timing(dict(params)))
+        payload = self._prepare_payload(validated)
         logger.debug(
             "binance_query_order", extra={"payload": self._redact_payload(payload)}
         )
-        return await self._call(self._gateway.query_order, **payload)
+        try:
+            return await self._call(self._gateway.query_order, **payload)
+        except Exception as exc:
+            self._log_and_raise("query_order", payload, exc)
 
     async def cancel_order(self, **params: Any) -> dict:
         """Cancel an existing order."""
-        payload = self._prepare_payload(params)
+        validated = validate_query_or_cancel_payload(self._attach_timing(dict(params)))
+        payload = self._prepare_payload(validated)
         logger.debug(
             "binance_cancel_order", extra={"payload": self._redact_payload(payload)}
         )
-        return await self._call(self._gateway.cancel_order, **payload)
+        try:
+            return await self._call(self._gateway.cancel_order, **payload)
+        except Exception as exc:
+            self._log_and_raise("cancel_order", payload, exc)
 
     async def open_orders(self, symbol: str | None = None) -> list[dict]:
         params: Dict[str, Any] = {}
         if symbol:
             params["symbol"] = symbol.upper()
-        result = await self._call(self._gateway.open_orders, **params)
+        validated = validate_query_or_cancel_payload(
+            self._attach_timing({"symbol": params.get("symbol"), "type": "open_orders"})
+        )
+        result = await self._call(self._gateway.open_orders, **validated)
         if isinstance(result, list):
             return result
         return [] if result is None else [result]
+
+    # ---------------------------
+    # Test order (no execution)
+    # ---------------------------
+    async def test_order(self, **params: Any) -> dict:
+        """
+        Call Binance test order endpoint to validate payload without execution.
+        Relies on the same validation/normalization as new_order.
+        """
+        merged = self._attach_timing(dict(params))
+        validated = validate_new_order_payload(merged)
+        await self._enforce_min_notional(validated)
+        payload = self._prepare_payload(validated)
+        logger.debug(
+            "binance_test_order", extra={"payload": self._redact_payload(payload)}
+        )
+        # If the SDK doesn't expose test_order, fall back to new_order on gateway if available.
+        test_fn = getattr(self._gateway, "test_order", None) or getattr(
+            self._gateway, "new_order", None
+        )
+        try:
+            return await self._call(test_fn, **payload)
+        except Exception as exc:
+            self._log_and_raise("test_order", payload, exc)
 
     async def close_position_market(
         self,
