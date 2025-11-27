@@ -129,6 +129,13 @@ class BinanceClient:
 
             pf = symbol_filters.get("PRICE_FILTER", {})
             lot = symbol_filters.get("LOT_SIZE", {})
+            # Defensive fallbacks for futures tick/step when SDK omits them
+            fallback_ticks = {"BTCUSDT": "0.1", "ETHUSDT": "0.01"}
+            if sym in fallback_ticks:
+                pf["tickSize"] = fallback_ticks[sym]
+            if not lot.get("stepSize"):
+                lot["stepSize"] = "0.001"
+
             if not pf.get("tickSize") or not lot.get("stepSize"):
                 logger.warning(
                     "Missing tickSize/stepSize for %s; falling back to precision",

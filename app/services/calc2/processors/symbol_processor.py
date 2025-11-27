@@ -133,10 +133,10 @@ class SymbolProcessor:
                         close_for_short=close_for_short,
                     )
 
-                    # Choose indicator candle (aligns ind_* with regime context)
-                    if ma20 is not None and ma200 is not None and ma20 > ma200:
+                    # Choose indicator candle based on regime (client spec: red for longs, green for shorts)
+                    if regime == "long":
                         ind_candle = self._last_red or c
-                    elif ma20 is not None and ma200 is not None and ma20 < ma200:
+                    elif regime == "short":
                         ind_candle = self._last_green or c
                     else:
                         ind_candle = c

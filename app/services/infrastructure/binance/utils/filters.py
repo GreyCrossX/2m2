@@ -42,6 +42,10 @@ def build_symbol_filters(
     Ensures we have fast access to LOT_SIZE, PRICE_FILTER, (MIN_)NOTIONAL and useful META.
     Works with Binance Futures exchangeInfo structure.
     """
+    fallback_ticks = {
+        "BTCUSDT": "0.1",
+        "ETHUSDT": "0.01",
+    }
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     symbols = exchange_info.get("symbols") or exchange_info.get("data") or []
@@ -55,6 +59,20 @@ def build_symbol_filters(
             ftype = f.get("filterType")
             if ftype:
                 filt_map[ftype] = f
+
+        # Fill missing PRICE_FILTER.tickSize from known fallbacks when absent
+        pf = filt_map.get("PRICE_FILTER")
+        if pf is None:
+            pf = {"filterType": "PRICE_FILTER"}
+            filt_map["PRICE_FILTER"] = pf
+        fallback_tick = fallback_ticks.get(str(sym).upper())
+        tick = pf.get("tickSize")
+        if fallback_tick:
+            # Always prefer known futures tick size for these symbols
+            pf["tickSize"] = fallback_tick
+        elif tick in (None, "", "0"):
+            # Secondary guard for other symbols: leave empty, quantize_price will use precision fallback
+            pf["tickSize"] = tick
 
         # Normalize NOTIONAL name across APIs
         if "NOTIONAL" in filt_map and "MIN_NOTIONAL" not in filt_map:
