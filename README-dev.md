@@ -1,19 +1,11 @@
 # Worker Service Development Guide
 
-## Environment Variables
+## Environment Variables (worker/dev)
 
-The Binance USDS futures adapter expects the following variables when running the
-worker locally:
-
-| Variable | Description |
-| --- | --- |
-| `BINANCE_API_KEY` | API key for the account (testnet or production). |
-| `BINANCE_API_SECRET` | Secret for the key above. |
-| `BINANCE_TESTNET` | Set to `true` to target the Binance testnet. |
-| `BINANCE_TIMEOUT_MS` | Optional timeout for REST calls (defaults to `5000`). |
-
-For testnet smoke testing you will also need to export the key/secret pair above
-and set `BINANCE_TESTNET=true`.
+- Core: `DATABASE_URL`/`POSTGRES_DSN`, `REDIS_URL`, `CREDENTIALS_MASTER_KEY`, `SECRET_KEY`
+- Binance creds for scripts/testnet smoke: `BINANCE_TESTNET_API`, `BINANCE_TESTNET_SECRET`
+- Worker flags: `WORKER_SYMBOLS`, `TIMEFRAME`, `DRY_RUN_MODE` (set `true` to avoid live orders)
+- Timeout/recv window (optional): `BINANCE_TIMEOUT_MS` (default 5000), `RECV_WINDOW_MS` (default 5000)
 
 ## Binance API/SKD guardrails (docs review)
 - Futures new orders require specific combos: LIMIT needs `price` + `timeInForce`; STOP/TAKE_PROFIT variants need `stopPrice`; Hedge mode must send `positionSide`; `closePosition` is only valid with STOP_MARKET/TAKE_PROFIT_MARKET; `batchOrders` is capped at 5 (doc: Binance Futures Connector Python).

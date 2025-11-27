@@ -35,7 +35,8 @@ BACKFILL_ON_START = os.getenv("BACKFILL_ON_START", "true").lower() in (
     "yes",
 )
 BACKFILL_1M_LIMIT = int(os.getenv("BACKFILL_1M_LIMIT", "500"))
-BACKFILL_MIN_2M = int(os.getenv("BACKFILL_MIN_2M", "150"))
+# Require ~200 two-minute candles so MA200 is ready immediately.
+BACKFILL_MIN_2M = int(os.getenv("BACKFILL_MIN_2M", "199"))
 
 # ── runtime toggles ───────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("INGESTOR_LOG_LEVEL", "INFO").upper()

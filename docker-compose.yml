@@ -106,7 +106,7 @@ services:
       # Backfill knobs (new)
       - BACKFILL_ON_START=${BACKFILL_ON_START:-true}
       - BACKFILL_1M_LIMIT=${BACKFILL_1M_LIMIT:-500}
-      - BACKFILL_MIN_2M=${BACKFILL_MIN_2M:-150}
+      - BACKFILL_MIN_2M=${BACKFILL_MIN_2M:-199}
       # Stream caps & retention
       - STREAM_MAXLEN_1M=${STREAM_MAXLEN_1M:-5000}
       - STREAM_MAXLEN_2M=${STREAM_MAXLEN_2M:-5000}
