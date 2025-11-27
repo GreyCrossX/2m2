@@ -24,6 +24,17 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _default_exchange_info_url() -> str:
+    override = os.getenv("EXCHANGE_INFO_URL")
+    if override:
+        return override
+
+    testnet = os.getenv("TESTNET", "false").lower() in ("1", "true", "yes")
+    if testnet:
+        return "https://testnet.binancefuture.com/fapi/v1/exchangeInfo"
+    return "https://fapi.binance.com/fapi/v1/exchangeInfo"
+
+
 @dataclass(frozen=True)
 class Config:
     redis_url: str = field(
@@ -45,6 +56,7 @@ class Config:
     )
 
     tick_size: float = field(default_factory=lambda: _env_float("TICK_SIZE", 0.01))
+    exchange_info_url: str = field(default_factory=_default_exchange_info_url)
     backoff_min_s: float = field(
         default_factory=lambda: _env_float("BACKOFF_MIN_S", 0.5)
     )

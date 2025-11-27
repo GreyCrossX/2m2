@@ -14,6 +14,7 @@ Regime = Literal["long", "short", "neutral"]
 @dataclass
 class SignalGenerator:
     tick_size: Decimal
+    tick_sizes: dict[str, Decimal] | None = None
     version: str = "1"
 
     def __post_init__(self) -> None:
@@ -24,6 +25,14 @@ class SignalGenerator:
             self.tick_size,
             self.version,
         )
+
+    def _tick_for(self, sym: str) -> Decimal:
+        """Return the tick size for a symbol, falling back to default."""
+        if self.tick_sizes:
+            t = self.tick_sizes.get(sym.upper())
+            if t is not None and t > 0:
+                return t
+        return self.tick_size
 
     # NEW: helper to build ARM signals (keeps logic in one place)
     def _arm(
@@ -37,9 +46,10 @@ class SignalGenerator:
         ind_high: Decimal,
         ind_low: Decimal,
     ) -> ArmSignal:
+        tick = self._tick_for(sym)
         if side == "long":
-            trigger = ind_high + self.tick_size
-            stop = ind_low - self.tick_size
+            trigger = ind_high + tick
+            stop = ind_low - tick
             logger.info(
                 "ARM LONG signal | sym=%s ts=%d trigger=%s stop=%s ind_high=%s ind_low=%s",
                 sym,
@@ -50,8 +60,8 @@ class SignalGenerator:
                 ind_low,
             )
         else:
-            trigger = ind_low - self.tick_size
-            stop = ind_high + self.tick_size
+            trigger = ind_low - tick
+            stop = ind_high + tick
             logger.info(
                 "ARM SHORT signal | sym=%s ts=%d trigger=%s stop=%s ind_high=%s ind_low=%s",
                 sym,

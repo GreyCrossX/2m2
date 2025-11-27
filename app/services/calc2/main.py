@@ -1,22 +1,24 @@
 from __future__ import annotations
 import asyncio
 import logging
+from decimal import Decimal
 from typing import Awaitable, List, cast
 
 from redis.asyncio import Redis
 
 from .config import Config
 from .utils.logging import setup_logging
+from .utils.tick_sizes import load_tick_sizes
 from .processors.symbol_processor import SymbolProcessor
 
 logger = logging.getLogger(__name__)
 
 
-async def _run_symbol(cfg: Config, r: Redis, sym: str) -> None:
+async def _run_symbol(cfg: Config, r: Redis, sym: str, tick_map: dict[str, Decimal]) -> None:
     """Run processor for a single symbol."""
     try:
         logger.info("Starting symbol processor | sym=%s", sym)
-        proc = SymbolProcessor(cfg, r, sym)
+        proc = SymbolProcessor(cfg, r, sym, tick_sizes=tick_map)
         await proc.run()
     except asyncio.CancelledError:
         logger.info("Symbol processor cancelled | sym=%s", sym)
@@ -48,6 +50,14 @@ async def main_async() -> None:
     log.info("  Catchup Threshold: %dms", cfg.catchup_threshold_ms)
     log.info("=" * 80)
 
+    # Load per-symbol tick sizes from exchangeInfo (fallback to env tick_size)
+    tick_map = load_tick_sizes(
+        cfg.symbols,
+        exchange_info_url=cfg.exchange_info_url,
+        fallback=Decimal(str(cfg.tick_size)),
+    )
+    log.info("Tick sizes resolved | %s", tick_map)
+
     r = Redis.from_url(cfg.redis_url, decode_responses=False)
 
     try:
@@ -61,7 +71,9 @@ async def main_async() -> None:
 
     tasks: List[asyncio.Task] = []
     for sym in cfg.symbols:
-        task = asyncio.create_task(_run_symbol(cfg, r, sym), name=f"proc:{sym}")
+        task = asyncio.create_task(
+            _run_symbol(cfg, r, sym, tick_map), name=f"proc:{sym}"
+        )
         tasks.append(task)
         log.info("Created task for symbol | sym=%s task_name=%s", sym, task.get_name())
 

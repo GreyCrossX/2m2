@@ -202,3 +202,37 @@ def test_same_indicator_no_duplicate_signals(generator: SignalGenerator) -> None
         )
         == []
     )
+
+
+def test_tick_size_prefers_symbol_override() -> None:
+    gen = SignalGenerator(
+        tick_size=Decimal("0.01"),
+        tick_sizes={"BTCUSDT": Decimal("0.1")},
+    )
+
+    # Prime neutral -> long
+    assert (
+        gen.maybe_signals(
+            sym="BTCUSDT",
+            tf="2m",
+            now_ts=1,
+            regime="neutral",
+            ind_ts=1,
+            ind_high=Decimal("101"),
+            ind_low=Decimal("99"),
+        )
+        == []
+    )
+
+    sigs = gen.maybe_signals(
+        sym="BTCUSDT",
+        tf="2m",
+        now_ts=2,
+        regime="long",
+        ind_ts=2,
+        ind_high=Decimal("100"),
+        ind_low=Decimal("90"),
+    )
+
+    arm = sigs[-1]
+    assert getattr(arm, "trigger") == Decimal("100.1")  # uses per-symbol tick 0.1, not default 0.01

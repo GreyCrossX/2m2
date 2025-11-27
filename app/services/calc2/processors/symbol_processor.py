@@ -21,7 +21,14 @@ logger = logging.getLogger(__name__)
 
 
 class SymbolProcessor:
-    def __init__(self, cfg: Config, r: Redis, sym: str) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        r: Redis,
+        sym: str,
+        *,
+        tick_sizes: dict[str, Decimal],
+    ) -> None:
         self.cfg = cfg
         self.r = r
         self.sym = sym
@@ -33,7 +40,9 @@ class SymbolProcessor:
         self.calc = IndicatorCandle(cfg.ma20_window, cfg.ma200_window)
         self.tracker = IndicatorTracker()
         self.regime = RegimeDetector()
-        self.signals = SignalGenerator(tick_size=Decimal(str(cfg.tick_size)))
+        self.signals = SignalGenerator(
+            tick_size=Decimal(str(cfg.tick_size)), tick_sizes=tick_sizes
+        )
         self._last_id: Optional[str] = None
         self._candle_count = 0
         self._signal_count = 0
