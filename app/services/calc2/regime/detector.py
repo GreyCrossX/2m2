@@ -13,8 +13,8 @@ class RegimeDetector:
 
     Decision rule:
     - neutral if ma20 or ma200 are missing
-    - long  if (ma20 < ma200) and (close_for_long  < ma20)   # last RED close below 20
-    - short if (ma20 > ma200) and (close_for_short > ma20)   # last GREEN close above 20
+    - long  if (ma20 > ma200) and (close_for_long  < ma20)   # bullish (golden cross), buy the dip
+    - short if (ma20 < ma200) and (close_for_short > ma20)   # bearish (death cross), sell the rip
     - neutral otherwise (including sideways between MAs)
     """
 
@@ -35,17 +35,17 @@ class RegimeDetector:
                 "Regime neutral (missing data) | ma20=%s ma200=%s", ma20, ma200
             )
             regime: Regime = "neutral"
-        elif (ma20 < ma200) and (close_for_long < ma20):
+        elif (ma20 > ma200) and (close_for_long < ma20):
             logger.debug(
-                "Regime long | ma20=%s < ma200=%s and close_for_long=%s < ma20",
+                "Regime long | ma20=%s > ma200=%s and close_for_long=%s < ma20",
                 ma20,
                 ma200,
                 close_for_long,
             )
             regime = "long"
-        elif (ma20 > ma200) and (close_for_short > ma20):
+        elif (ma20 < ma200) and (close_for_short > ma20):
             logger.debug(
-                "Regime short | ma20=%s > ma200=%s close_for_short=%s > ma20",
+                "Regime short | ma20=%s < ma200=%s close_for_short=%s > ma20",
                 ma20,
                 ma200,
                 close_for_short,
