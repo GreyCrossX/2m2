@@ -80,6 +80,7 @@ class BinanceUSDS:
             raise ValueError("BinanceUSDSConfig requires api_key and api_secret")
 
         self._config = config
+        self._rest: Any
         base_path = (
             DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL
             if config.testnet
@@ -342,3 +343,9 @@ class BinanceUSDS:
         """Return the configured timeout in milliseconds."""
 
         return self._timeout_ms
+
+    @property
+    def config(self) -> BinanceUSDSConfig:
+        """Return the adapter configuration."""
+
+        return self._config

@@ -14,7 +14,9 @@ from .processors.symbol_processor import SymbolProcessor
 logger = logging.getLogger(__name__)
 
 
-async def _run_symbol(cfg: Config, r: Redis, sym: str, tick_map: dict[str, Decimal]) -> None:
+async def _run_symbol(
+    cfg: Config, r: Redis, sym: str, tick_map: dict[str, Decimal]
+) -> None:
     """Run processor for a single symbol."""
     try:
         logger.info("Starting symbol processor | sym=%s", sym)

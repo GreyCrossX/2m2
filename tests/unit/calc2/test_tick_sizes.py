@@ -17,7 +17,9 @@ class _FakeResponse:
     def __enter__(self) -> "_FakeResponse":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - nothing to clean
+    def __exit__(
+        self, exc_type, exc, tb
+    ) -> None:  # pragma: no cover - nothing to clean
         return None
 
 

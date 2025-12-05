@@ -61,6 +61,7 @@ class BinanceOrderMonitor:
     """Polls Binance for order status changes to drive state transitions."""
 
     ACTIVE_STATUSES = (OrderStatus.PENDING, OrderStatus.FILLED, OrderStatus.ARMED)
+    _CLOSED_STATUSES = (OrderStatus.CLOSED, OrderStatus.CANCELLED)
 
     def __init__(
         self,
@@ -145,6 +146,19 @@ class BinanceOrderMonitor:
             else:
                 await self._handle_active(bot, state, trading)
 
+        # Defensive cleanup: cancel lingering TP/SL on already closed/cancelled states
+        closed_states = await self._orders.list_states_by_statuses(
+            self._CLOSED_STATUSES
+        )
+        for state in closed_states:
+            if not (state.take_profit_order_id or state.stop_order_id):
+                continue
+            bot = await self._get_bot(state.bot_id)
+            if bot is None:
+                continue
+            trading = await self._get_trading(bot)
+            await self._cleanup_orphan_exits(bot, state, trading)
+
     async def _get_bot(self, bot_id: UUID) -> Optional[BotConfig]:
         cached = self._bot_cache.get(bot_id)
         if cached is not None:
@@ -227,6 +241,14 @@ class BinanceOrderMonitor:
         trading: TradingClient,
     ) -> None:
         await self._ensure_position(bot, state, trading)
+        # If the position is gone but protective orders remain, clean them up.
+        if (
+            self._positions.get_position(bot.id) is None
+            and state.status in (OrderStatus.ARMED, OrderStatus.FILLED)
+            and (state.take_profit_order_id or state.stop_order_id)
+        ):
+            if await self._cleanup_orphan_exits(bot, state, trading):
+                return
         for label, oid in (
             ("take_profit", state.take_profit_order_id),
             ("stop", state.stop_order_id),
@@ -280,6 +302,51 @@ class BinanceOrderMonitor:
         except WorkerException as exc:
             log.warning("Failed to rehydrate position | bot_id=%s err=%s", bot.id, exc)
             return None
+
+    async def _cleanup_orphan_exits(
+        self,
+        bot: BotConfig,
+        state: OrderState,
+        trading: TradingClient,
+    ) -> bool:
+        """Cancel lingering TP/SL orders when we should have no position."""
+        cancelled_any = False
+        for label, oid in (
+            ("take_profit", state.take_profit_order_id),
+            ("stop", state.stop_order_id),
+        ):
+            if not oid:
+                continue
+            try:
+                await trading.cancel_order(state.symbol, int(oid))
+                cancelled_any = True
+                log.info(
+                    "Orphan exit order cancelled | bot_id=%s symbol=%s order_id=%s label=%s",
+                    bot.id,
+                    state.symbol,
+                    oid,
+                    label,
+                )
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                log.warning(
+                    "Failed to cancel orphan %s order | bot_id=%s symbol=%s order_id=%s err=%s",
+                    label,
+                    bot.id,
+                    state.symbol,
+                    oid,
+                    exc,
+                )
+
+        if cancelled_any:
+            state.take_profit_order_id = None
+            state.stop_order_id = None
+            # Do not change status for CLOSED/CANCELLED; for active states mark closed.
+            if state.status in (OrderStatus.ARMED, OrderStatus.FILLED):
+                state.mark(OrderStatus.CLOSED)
+            else:
+                state.touch()
+            await self._orders.save_state(state)
+        return cancelled_any
 
     async def _on_entry_filled(
         self,

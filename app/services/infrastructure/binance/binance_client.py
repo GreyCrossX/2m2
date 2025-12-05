@@ -297,6 +297,58 @@ class BinanceClient:
         )
         raise exc
 
+    async def _retry_with_requantize(
+        self, payload: Dict[str, Any], exc: Exception
+    ) -> dict | None:
+        """Best-effort retry when Binance rejects price/tick precision."""
+        reason = str(exc).lower()
+        if not any(key in reason for key in ("tick size", "price filter", "precision")):
+            return None
+
+        sym = payload.get("symbol")
+        price = payload.get("price")
+        qty = payload.get("quantity")
+        if not sym or price is None or qty is None:
+            return None
+
+        try:
+            # Force refresh so we don't reuse stale tick/step caches
+            self._filters.pop(str(sym).upper(), None)
+            self._exchange_info_fetched_at = None
+            filters = await self._get_symbol_filters(str(sym))
+            q_qty = quantize_qty(filters, Decimal(str(qty)))
+            q_price = quantize_price(filters, Decimal(str(price)))
+            if q_qty <= 0 or q_price is None or q_price <= 0:
+                return None
+            new_payload = dict(payload)
+            new_payload["quantity"] = str(q_qty)
+            new_payload["price"] = str(q_price)
+        except Exception as retry_exc:  # noqa: BLE001 - best-effort path
+            logger.debug(
+                "Requantize retry skipped | sym=%s err=%s",
+                sym,
+                retry_exc,
+                exc_info=True,
+            )
+            return None
+
+        logger.warning(
+            "Retrying new_order with refreshed quantization | sym=%s old_qty=%s new_qty=%s old_price=%s new_price=%s reason=%s",
+            sym,
+            payload.get("quantity"),
+            new_payload["quantity"],
+            payload.get("price"),
+            new_payload["price"],
+            exc,
+        )
+        try:
+            return await self._call(self._gateway.new_order, **new_payload)
+        except Exception as retry_exc:  # noqa: BLE001 - only warn, fall through
+            logger.warning(
+                "Retry after requantize failed | sym=%s err=%s", sym, retry_exc
+            )
+            return None
+
     # ---------------------------
     # Order endpoints
     # ---------------------------
@@ -313,6 +365,9 @@ class BinanceClient:
         try:
             return await self._call(self._gateway.new_order, **payload)
         except Exception as exc:
+            retry = await self._retry_with_requantize(dict(payload), exc)
+            if retry is not None:
+                return retry
             self._log_and_raise("new_order", payload, exc)
 
     async def query_order(self, **params: Any) -> dict:

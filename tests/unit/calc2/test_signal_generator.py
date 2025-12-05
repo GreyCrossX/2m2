@@ -235,4 +235,6 @@ def test_tick_size_prefers_symbol_override() -> None:
     )
 
     arm = sigs[-1]
-    assert getattr(arm, "trigger") == Decimal("100.1")  # uses per-symbol tick 0.1, not default 0.01
+    assert getattr(arm, "trigger") == Decimal(
+        "100.1"
+    )  # uses per-symbol tick 0.1, not default 0.01

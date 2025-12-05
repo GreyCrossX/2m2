@@ -44,6 +44,8 @@ class SymbolProcessor:
             tick_size=Decimal(str(cfg.tick_size)), tick_sizes=tick_sizes
         )
         self._last_id: Optional[str] = None
+        self._last_regime: Optional[str] = None
+        self._regime_started_at: Optional[int] = None
         self._candle_count = 0
         self._signal_count = 0
 
@@ -131,15 +133,40 @@ class SymbolProcessor:
                         ma200=ma200,
                         close_for_long=close_for_long,
                         close_for_short=close_for_short,
+                        ts=c.ts,
                     )
 
-                    # Choose indicator candle based on regime (client spec: red for longs, green for shorts)
-                    if regime == "long":
-                        ind_candle = self._last_red or c
-                    elif regime == "short":
-                        ind_candle = self._last_green or c
-                    else:
-                        ind_candle = c
+                    # On a crossover we reset the indicator so we only use candles AFTER the cross.
+                    if regime != self._last_regime:
+                        if regime == "long":
+                            self._last_red = c if c.close < c.open else None
+                            self._regime_started_at = c.ts
+                        elif regime == "short":
+                            self._last_green = c if c.close > c.open else None
+                            self._regime_started_at = c.ts
+                        else:
+                            self._regime_started_at = None
+
+                    # Choose indicator candle based on regime (spec: red for longs, green for shorts) and
+                    # require it to form after the crossover.
+                    ind_candle = None
+                    if regime == "long" and self._last_red:
+                        if (
+                            self._regime_started_at is None
+                            or self._last_red.ts >= self._regime_started_at
+                        ):
+                            ind_candle = self._last_red
+                    elif regime == "short" and self._last_green:
+                        if (
+                            self._regime_started_at is None
+                            or self._last_green.ts >= self._regime_started_at
+                        ):
+                            ind_candle = self._last_green
+
+                    # No valid indicator yet? Stay neutral for signals until we get the opposite-color candle.
+                    signal_regime = regime if ind_candle else "neutral"
+                    ind_candle = ind_candle or c
+                    self._last_regime = regime
 
                     ind_ts = ind_candle.ts
                     ind_high = ind_candle.high
@@ -153,7 +180,7 @@ class SymbolProcessor:
                         )
                         logger.debug(
                             "Regime eval | sym=%s ts=%d ma20=%s ma200=%s close_for_long=%s close_for_short=%s "
-                            "regime=%s ind_ts=%s ind_high=%s ind_low=%s last_red_ts=%s last_green_ts=%s",
+                            "regime=%s signal_regime=%s ind_ts=%s ind_high=%s ind_low=%s last_red_ts=%s last_green_ts=%s",
                             self.sym,
                             c.ts,
                             ma20,
@@ -161,6 +188,7 @@ class SymbolProcessor:
                             close_for_long,
                             close_for_short,
                             regime,
+                            signal_regime,
                             ind_ts,
                             ind_high,
                             ind_low,
@@ -198,7 +226,7 @@ class SymbolProcessor:
                             sym=c.sym,
                             tf=c.tf,
                             now_ts=c.ts,
-                            regime=regime,
+                            regime=signal_regime,
                             ind_ts=ind_ts,
                             ind_high=ind_high,
                             ind_low=ind_low,

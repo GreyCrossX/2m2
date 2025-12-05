@@ -22,11 +22,12 @@ pytest = "*"
 fakeredis = "*"
 pytest-asyncio = "*"
 pytest-timeout = "*"
-ruff = "*"
 requests = "*"
 prometheus-client = "*"
 binance-common = "*"
 binance-sdk-derivatives-trading-usds-futures = "*"
+ruff = "*"
+sniffio = "*"
 
 [dev-packages]
 

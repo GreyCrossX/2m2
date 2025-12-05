@@ -5,7 +5,15 @@ from pathlib import Path
 
 def _load_filters_module():
     root = Path(__file__).resolve().parents[4]
-    mod_path = root / "app" / "services" / "infrastructure" / "binance" / "utils" / "filters.py"
+    mod_path = (
+        root
+        / "app"
+        / "services"
+        / "infrastructure"
+        / "binance"
+        / "utils"
+        / "filters.py"
+    )
     spec = importlib.util.spec_from_file_location("filters_under_test", mod_path)
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     assert spec and spec.loader
