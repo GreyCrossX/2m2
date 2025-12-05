@@ -123,7 +123,6 @@ def _order_state(
     )
 
 
-@pytest.mark.asyncio
 async def test_entry_fill_transitions_to_armed() -> None:
     bot = _bot()
     trading = TradingStub()
@@ -149,7 +148,6 @@ async def test_entry_fill_transitions_to_armed() -> None:
     assert positions.get_position(bot.id) is not None
 
 
-@pytest.mark.asyncio
 async def test_exit_fill_closes_position_and_cancels_other_leg() -> None:
     bot = _bot()
     trading = TradingStub()
@@ -179,12 +177,11 @@ async def test_exit_fill_closes_position_and_cancels_other_leg() -> None:
     await monitor.run_once()
 
     updated = gateway.states[0]
-    assert updated.status == OrderStatus.CLOSED
+    assert updated.status == OrderStatus.CANCELLED
     assert positions.get_position(bot.id) is None
     assert 2 in trading.cancelled
 
 
-@pytest.mark.asyncio
 async def test_sync_on_startup_rehydrates_position() -> None:
     bot = _bot()
     trading = TradingStub()

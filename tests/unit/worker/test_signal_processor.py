@@ -144,7 +144,6 @@ def _disarm_signal(prev_side: OrderSide) -> DisarmSignal:
     )
 
 
-@pytest.mark.asyncio
 async def test_disarm_cancels_all_related_orders() -> None:
     bot = _make_bot()
     state = OrderState(
@@ -186,7 +185,6 @@ async def test_disarm_cancels_all_related_orders() -> None:
     assert orders.saved[0].status == OrderStatus.CANCELLED
 
 
-@pytest.mark.asyncio
 async def test_arm_signal_skips_when_active_trade_present() -> None:
     bot = _make_bot()
     active_state = OrderState(
@@ -221,7 +219,6 @@ async def test_arm_signal_skips_when_active_trade_present() -> None:
     assert not orders.saved
 
 
-@pytest.mark.asyncio
 async def test_arm_signal_records_skipped_whitelist_state() -> None:
     bot = replace(_make_bot(), side_whitelist=SideWhitelist.LONG)
 
@@ -247,7 +244,6 @@ async def test_arm_signal_records_skipped_whitelist_state() -> None:
     assert executor.calls == []
 
 
-@pytest.mark.asyncio
 async def test_disabled_bot_logs_and_skips(caplog: pytest.LogCaptureFixture) -> None:
     bot = replace(_make_bot(), enabled=False)
 
@@ -274,7 +270,6 @@ async def test_disabled_bot_logs_and_skips(caplog: pytest.LogCaptureFixture) -> 
     )
 
 
-@pytest.mark.asyncio
 async def test_second_signal_skipped_when_pyramiding_disabled() -> None:
     bot = _make_bot()
 
@@ -319,7 +314,6 @@ class PositionStoreStub:
         return [p for p in self.positions if p.bot_id == bot_id]
 
 
-@pytest.mark.asyncio
 async def test_dual_signal_processed_when_pyramiding_enabled() -> None:
     bot = _make_bot()
     object.__setattr__(bot, "allow_pyramiding", True)

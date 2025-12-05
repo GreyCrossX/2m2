@@ -61,7 +61,7 @@ class BinanceOrderMonitor:
     """Polls Binance for order status changes to drive state transitions."""
 
     ACTIVE_STATUSES = (OrderStatus.PENDING, OrderStatus.FILLED, OrderStatus.ARMED)
-    _CLOSED_STATUSES = (OrderStatus.CLOSED, OrderStatus.CANCELLED)
+    _CLOSED_STATUSES = (OrderStatus.CANCELLED,)
 
     def __init__(
         self,
@@ -340,9 +340,9 @@ class BinanceOrderMonitor:
         if cancelled_any:
             state.take_profit_order_id = None
             state.stop_order_id = None
-            # Do not change status for CLOSED/CANCELLED; for active states mark closed.
+            # Do not change status for already-cancelled; for active states mark cancelled.
             if state.status in (OrderStatus.ARMED, OrderStatus.FILLED):
-                state.mark(OrderStatus.CLOSED)
+                state.mark(OrderStatus.CANCELLED)
             else:
                 state.touch()
             await self._orders.save_state(state)
@@ -420,7 +420,7 @@ class BinanceOrderMonitor:
                         exc,
                     )
 
-        state.mark(OrderStatus.CLOSED)
+        state.mark(OrderStatus.CANCELLED)
         await self._orders.save_state(state)
         await self._positions.close_position(bot.id, reason)
         fill_price = _to_decimal(

@@ -82,22 +82,22 @@ class RegimeDetector:
 
         # Additional price-action gate: only enter trend if price is on the correct side of BOTH MAs
         if candidate == "long":
-            if close_for_long < ma20 and close_for_long < ma200:
+            if close_for_long > ma20 and close_for_long > ma200:
                 regime = "long"
             else:
                 logger.debug(
-                    "Regime gated to neutral (price above MA) | close_for_long=%s ma20=%s ma200=%s",
+                    "Regime gated to neutral (price not above both MAs) | close_for_long=%s ma20=%s ma200=%s",
                     close_for_long,
                     ma20,
                     ma200,
                 )
                 regime = "neutral"
         else:
-            if close_for_short > ma20 and close_for_short > ma200:
+            if close_for_short < ma20 and close_for_short < ma200:
                 regime = "short"
             else:
                 logger.debug(
-                    "Regime gated to neutral (price below MA) | close_for_short=%s ma20=%s ma200=%s",
+                    "Regime gated to neutral (price not below both MAs) | close_for_short=%s ma20=%s ma200=%s",
                     close_for_short,
                     ma20,
                     ma200,

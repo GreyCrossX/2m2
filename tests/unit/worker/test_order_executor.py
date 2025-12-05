@@ -191,7 +191,6 @@ def test_calculate_position_size_honors_max_position_cap() -> None:
     assert qty == Decimal("1")
 
 
-@pytest.mark.asyncio
 async def test_preflight_qty_respects_symbol_precision() -> None:
     filters = {
         "LOT_SIZE": {"stepSize": "0", "minQty": "0"},
@@ -216,7 +215,6 @@ async def test_preflight_qty_respects_symbol_precision() -> None:
     assert reason is None
 
 
-@pytest.mark.asyncio
 async def test_preflight_qty_bumps_to_min_notional_and_checks_margin() -> None:
     filters = {
         "LOT_SIZE": {"stepSize": "0.01", "minQty": "0.05"},
@@ -241,7 +239,6 @@ async def test_preflight_qty_bumps_to_min_notional_and_checks_margin() -> None:
     assert reason is None
 
 
-@pytest.mark.asyncio
 async def test_execute_order_places_stop_and_tp() -> None:
     bot = _make_bot()
     signal = _make_signal(OrderSide.LONG)
@@ -271,7 +268,6 @@ async def test_execute_order_places_stop_and_tp() -> None:
     assert state.status == OrderStatus.PENDING
 
 
-@pytest.mark.asyncio
 async def test_execute_order_rolls_back_when_tp_fails() -> None:
     bot = _make_bot()
     signal = _make_signal(OrderSide.LONG)
@@ -294,7 +290,6 @@ async def test_execute_order_rolls_back_when_tp_fails() -> None:
     assert cancelled_ids == {111, 222}
 
 
-@pytest.mark.asyncio
 async def test_execute_order_rolls_back_when_stop_fails() -> None:
     bot = _make_bot()
     signal = _make_signal(OrderSide.LONG)
@@ -317,7 +312,6 @@ async def test_execute_order_rolls_back_when_stop_fails() -> None:
     assert trading.tp_orders == []
 
 
-@pytest.mark.asyncio
 async def test_execute_order_marks_failed_on_rate_limit_entry() -> None:
     bot = _make_bot()
     signal = _make_signal(OrderSide.LONG)
@@ -333,7 +327,6 @@ async def test_execute_order_marks_failed_on_rate_limit_entry() -> None:
     assert trading.cancelled == []
 
 
-@pytest.mark.asyncio
 async def test_execute_order_rolls_back_on_rate_limit_tp() -> None:
     bot = _make_bot()
     signal = _make_signal(OrderSide.LONG)
@@ -354,7 +347,6 @@ async def test_execute_order_rolls_back_on_rate_limit_tp() -> None:
     assert cancelled_ids == {111, 222}
 
 
-@pytest.mark.asyncio
 async def test_execute_order_rolls_back_on_rate_limit_stop() -> None:
     bot = _make_bot()
     signal = _make_signal(OrderSide.LONG)
@@ -374,7 +366,6 @@ async def test_execute_order_rolls_back_on_rate_limit_stop() -> None:
     assert cancelled_ids == [111]
 
 
-@pytest.mark.asyncio
 async def test_execute_order_rolls_back_on_exchange_down_stop() -> None:
     bot = _make_bot()
     signal = _make_signal(OrderSide.LONG)

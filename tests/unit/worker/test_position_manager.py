@@ -23,7 +23,6 @@ def _filled_state(quantity: Decimal) -> OrderState:
     )
 
 
-@pytest.mark.asyncio
 async def test_open_position_tracks_multiple_entries() -> None:
     manager = PositionManager()
 
@@ -44,7 +43,6 @@ async def test_open_position_tracks_multiple_entries() -> None:
     assert positions[1].quantity == Decimal("0.2")
 
 
-@pytest.mark.asyncio
 async def test_close_position_sums_quantities() -> None:
     manager = PositionManager()
 

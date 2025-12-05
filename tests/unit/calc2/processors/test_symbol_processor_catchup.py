@@ -16,7 +16,6 @@ class DummyPublisher:
         return "id-1"
 
 
-@pytest.mark.asyncio
 async def test_handle_catchup_publishes_last_signal_only() -> None:
     processor = SymbolProcessor.__new__(SymbolProcessor)
     processor._catchup_mode = True
@@ -50,7 +49,6 @@ async def test_handle_catchup_publishes_last_signal_only() -> None:
     assert processor.publisher.published == [arm.to_stream_map()]
 
 
-@pytest.mark.asyncio
 async def test_handle_catchup_no_signal_no_publish() -> None:
     processor = SymbolProcessor.__new__(SymbolProcessor)
     processor._catchup_mode = True
