@@ -61,7 +61,12 @@ class BinanceOrderMonitor:
     """Polls Binance for order status changes to drive state transitions."""
 
     ACTIVE_STATUSES = (OrderStatus.PENDING, OrderStatus.FILLED, OrderStatus.ARMED)
-    _CLOSED_STATUSES = (OrderStatus.CANCELLED,)
+    _CLOSED_STATUSES = (
+        OrderStatus.CANCELLED,
+        OrderStatus.FAILED,
+        OrderStatus.SKIPPED_LOW_BALANCE,
+        OrderStatus.SKIPPED_WHITELIST,
+    )
 
     def __init__(
         self,
@@ -340,7 +345,6 @@ class BinanceOrderMonitor:
         if cancelled_any:
             state.take_profit_order_id = None
             state.stop_order_id = None
-            # Do not change status for already-cancelled; for active states mark cancelled.
             if state.status in (OrderStatus.ARMED, OrderStatus.FILLED):
                 state.mark(OrderStatus.CANCELLED)
             else:
