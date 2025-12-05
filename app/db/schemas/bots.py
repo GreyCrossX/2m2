@@ -23,6 +23,7 @@ class BotBase(BaseModel):
     )
     fixed_notional: Decimal = Field(default=Decimal("0.0000"), ge=Decimal("0"))
     max_position_usdt: Decimal = Field(default=Decimal("0.0000"), ge=Decimal("0"))
+    tp_r_multiple: Decimal = Field(default=Decimal("1.5"), ge=Decimal("0"))
 
     nickname: str = Field(default="", max_length=64)
 
@@ -52,6 +53,7 @@ class BotUpdate(BaseModel):
     )
     fixed_notional: Optional[Decimal] = Field(default=None, ge=Decimal("0"))
     max_position_usdt: Optional[Decimal] = Field(default=None, ge=Decimal("0"))
+    tp_r_multiple: Optional[Decimal] = Field(default=None, ge=Decimal("0"))
     nickname: Optional[str] = Field(default=None, max_length=64)
 
 

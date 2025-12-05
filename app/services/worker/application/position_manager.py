@@ -23,13 +23,16 @@ class PositionManager:
         side: OrderSide,
         entry: Decimal,
         stop: Decimal,
+        *,
+        tp_r_multiple: Decimal | None = None,
     ) -> Decimal:
         distance = (entry - stop) if side == OrderSide.LONG else (stop - entry)
         if distance <= 0:
             distance = abs(entry - stop)
+        r = tp_r_multiple if tp_r_multiple is not None else self._tp_r
         if side == OrderSide.LONG:
-            return entry + self._tp_r * distance
-        return entry - self._tp_r * distance
+            return entry + r * distance
+        return entry - r * distance
 
     async def open_position(
         self,
@@ -37,6 +40,7 @@ class PositionManager:
         order_state: OrderState,
         *,
         allow_pyramiding: bool = False,
+        tp_r_multiple: Decimal | None = None,
     ) -> Position:
         if order_state.status not in (OrderStatus.FILLED, OrderStatus.ARMED):
             raise WorkerException("open_position requires FILLED/ARMED order state.")
@@ -50,7 +54,9 @@ class PositionManager:
         if qty <= 0:
             raise WorkerException("open_position requires positive quantity.")
 
-        take_profit = self._compute_take_profit(order_state.side, entry, stop)
+        take_profit = self._compute_take_profit(
+            order_state.side, entry, stop, tp_r_multiple=tp_r_multiple
+        )
         layer = Position(
             bot_id=bot_id,
             symbol=order_state.symbol,
@@ -75,7 +81,7 @@ class PositionManager:
             existing.quantity = total_qty
             existing.stop_loss = stop
             existing.take_profit = self._compute_take_profit(
-                order_state.side, weighted_entry, stop
+                order_state.side, weighted_entry, stop, tp_r_multiple=tp_r_multiple
             )
             self._layers.setdefault(bot_id, []).append(layer)
             return existing

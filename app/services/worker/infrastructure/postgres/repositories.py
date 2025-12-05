@@ -61,6 +61,7 @@ def _to_bot_config(row: ORMBot) -> BotConfig:
         balance_pct=Decimal(str(row.balance_pct or 0)),
         fixed_notional=Decimal(str(row.fixed_notional or 0)),
         max_position_usdt=Decimal(str(row.max_position_usdt or 0)),
+        tp_r_multiple=Decimal(str(getattr(row, "tp_r_multiple", None) or "1.5")),
     )
 
 

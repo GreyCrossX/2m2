@@ -52,6 +52,7 @@ class Bot(Base):
     balance_pct = Column(Numeric(6, 4), nullable=False, server_default="0.0500")
     fixed_notional = Column(Numeric(18, 4), nullable=False, server_default="0.0000")
     max_position_usdt = Column(Numeric(18, 4), nullable=False, server_default="0.0000")
+    tp_r_multiple = Column(Numeric(6, 3), nullable=False, server_default="1.500")
 
     # optional QoL
     nickname = Column(String(64), nullable=False, default="")

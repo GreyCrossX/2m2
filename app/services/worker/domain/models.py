@@ -243,6 +243,7 @@ class BotConfig:
     balance_pct: Decimal  # used if use_balance_pct is True
     fixed_notional: Optional[Decimal]  # alternative sizing mode
     max_position_usdt: Optional[Decimal]  # risk cap per position
+    tp_r_multiple: Decimal = Decimal("1.5")
 
     def allows_side(self, side: OrderSide) -> bool:
         """Check if the bot is configured to trade the given side."""

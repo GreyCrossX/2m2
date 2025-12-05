@@ -299,6 +299,7 @@ class BinanceOrderMonitor:
                 bot.id,
                 state,
                 allow_pyramiding=allow_pyramiding,
+                tp_r_multiple=getattr(bot, "tp_r_multiple", None),
             )
             if state.status == OrderStatus.FILLED:
                 state.mark(OrderStatus.ARMED)
@@ -380,6 +381,7 @@ class BinanceOrderMonitor:
             bot.id,
             state,
             allow_pyramiding=allow_pyramiding,
+            tp_r_multiple=getattr(bot, "tp_r_multiple", None),
         )
 
         state.mark(OrderStatus.ARMED)

@@ -238,7 +238,12 @@ class OrderExecutor:
 
     # --- TP math ---
     def _compute_tp_price(
-        self, side: OrderSide, trigger: Decimal, stop: Decimal
+        self,
+        side: OrderSide,
+        trigger: Decimal,
+        stop: Decimal,
+        *,
+        tp_r_multiple: Decimal | None = None,
     ) -> Decimal:
         """
         TP distance = tp_r_multiple × |trigger - stop|.
@@ -249,7 +254,7 @@ class OrderExecutor:
         - SHORT: TP = trigger - distance * R
         """
         distance = abs(trigger - stop)
-        r = self._tp_r
+        r = tp_r_multiple if tp_r_multiple is not None else self._tp_r
         if side == OrderSide.LONG:
             return trigger + (distance * r)
         return trigger - (distance * r)
@@ -501,7 +506,10 @@ class OrderExecutor:
             )
 
         # --- 7) Quantize TP price separately
-        tp_target = self._compute_tp_price(signal.side, signal.trigger, signal.stop)
+        tp_r = getattr(bot, "tp_r_multiple", None)
+        tp_target = self._compute_tp_price(
+            signal.side, signal.trigger, signal.stop, tp_r_multiple=tp_r
+        )
         _, q_tp_price = await trading.quantize_limit_order(
             signal.symbol, q_qty, tp_target
         )
