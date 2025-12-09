@@ -40,6 +40,8 @@ def _from_domain(s: OrderState) -> dict:
         avg_fill_price=Decimal(s.avg_fill_price)
         if s.avg_fill_price is not None
         else None,
+        exit_price=Decimal(s.exit_price) if s.exit_price is not None else None,
+        realized_pnl=Decimal(s.realized_pnl or 0),
         last_fill_at=s.last_fill_at,
         created_at=s.created_at,
         updated_at=s.updated_at,
@@ -84,6 +86,12 @@ def _to_domain(r: OrderStateRecord) -> OrderState:
             if getattr(r, "avg_fill_price", None) is not None
             else None
         ),
+        exit_price=(
+            Decimal(str(r.exit_price))
+            if getattr(r, "exit_price", None) is not None
+            else None
+        ),
+        realized_pnl=Decimal(str(getattr(r, "realized_pnl", 0) or 0)),
         last_fill_at=getattr(r, "last_fill_at", None),
         created_at=cast(datetime, r.created_at),
         updated_at=cast(datetime, r.updated_at),

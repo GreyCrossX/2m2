@@ -69,6 +69,8 @@ class OrderStateRecord(Base):
     filled_quantity = Column(Numeric(18, 8), nullable=False, server_default=text("0"))
     avg_fill_price = Column(Numeric(18, 8), nullable=True)
     last_fill_at = Column(DateTime(timezone=True), nullable=True)
+    exit_price = Column(Numeric(18, 8), nullable=True)
+    realized_pnl = Column(Numeric(18, 8), nullable=False, server_default=text("0"))
 
     created_at = Column(
         DateTime(timezone=True),

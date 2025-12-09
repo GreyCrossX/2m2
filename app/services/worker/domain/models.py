@@ -277,6 +277,8 @@ class OrderState:
     filled_quantity: Decimal = Decimal("0")
     avg_fill_price: Optional[Decimal] = None
     last_fill_at: Optional[datetime] = None
+    exit_price: Optional[Decimal] = None
+    realized_pnl: Decimal = Decimal("0")
 
     id: UUID = field(default_factory=uuid4)
     order_id: Optional[int] = None  # Binance-assigned orderId (int per UMFutures)

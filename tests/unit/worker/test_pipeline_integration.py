@@ -35,6 +35,7 @@ class StubTrading:
     def __init__(self) -> None:
         self.cancelled: List[int] = []
         self.created: List[int] = []
+        self.open_orders: List[dict] = []
         self._next_id = 1
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
@@ -68,10 +69,13 @@ class StubTrading:
         *,
         reduce_only: bool = True,
         order_type: str = "STOP_MARKET",
+        new_client_order_id: Optional[str] = None,
     ) -> dict:
         oid = self._next()
         self.created.append(oid)
-        return {"orderId": oid}
+        record = {"orderId": oid, "clientOrderId": new_client_order_id}
+        self.open_orders.append(record)
+        return record
 
     async def create_take_profit_limit(
         self,
@@ -86,7 +90,9 @@ class StubTrading:
     ) -> dict:
         oid = self._next()
         self.created.append(oid)
-        return {"orderId": oid}
+        record = {"orderId": oid, "clientOrderId": new_client_order_id}
+        self.open_orders.append(record)
+        return record
 
     async def get_symbol_filters(self, symbol: str) -> dict:
         # Minimal filter so quantization/min-notional passes
@@ -103,6 +109,10 @@ class StubTrading:
 
     async def cancel_order(self, symbol: str, order_id: int) -> None:
         self.cancelled.append(order_id)
+        self.open_orders = [o for o in self.open_orders if o.get("orderId") != order_id]
+
+    async def list_open_orders(self, symbol: str | None = None) -> List[dict]:
+        return list(self.open_orders)
 
     def _next(self) -> int:
         oid = self._next_id

@@ -4,7 +4,10 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from app.services.worker.application.order_executor import OrderExecutor
+from app.services.worker.application.order_executor import (
+    OrderExecutor,
+    _bot_client_prefix,
+)
 from app.services.worker.domain.enums import OrderSide, OrderStatus, SideWhitelist
 from app.services.worker.domain.exceptions import DomainExchangeDown, DomainRateLimit
 from app.services.worker.domain.models import ArmSignal, BotConfig
@@ -48,6 +51,7 @@ class TradingStub:
         self.stop_orders: list[dict] = []
         self.tp_orders: list[dict] = []
         self.cancelled: list[dict] = []
+        self.open_orders: list[dict] = []
         self._filters = filters or {
             "LOT_SIZE": {"stepSize": "0.001", "minQty": "0"},
             "META": {"quantityPrecision": 3},
@@ -74,7 +78,12 @@ class TradingStub:
             raise self.stop_exc
         if self.fail_stop:
             raise RuntimeError("stop failed")
-        return {"orderId": 222}
+        order = {
+            "orderId": 222,
+            "clientOrderId": payload.get("new_client_order_id"),
+        }
+        self.open_orders.append(order)
+        return order
 
     async def create_take_profit_limit(self, **payload) -> dict:
         self.tp_orders.append(payload)
@@ -82,13 +91,22 @@ class TradingStub:
             raise self.tp_exc
         if self.fail_tp:
             raise RuntimeError("tp failed")
-        return {"orderId": 333}
+        order = {
+            "orderId": 333,
+            "clientOrderId": payload.get("new_client_order_id"),
+        }
+        self.open_orders.append(order)
+        return order
 
     async def get_symbol_filters(self, symbol: str) -> dict:
         return self._filters
 
     async def cancel_order(self, *, symbol: str, order_id: int) -> None:
         self.cancelled.append({"symbol": symbol, "order_id": order_id})
+        self.open_orders = [o for o in self.open_orders if o.get("orderId") != order_id]
+
+    async def list_open_orders(self, symbol: str | None = None) -> list[dict]:
+        return list(self.open_orders)
 
 
 def _make_bot() -> BotConfig:
@@ -265,6 +283,33 @@ async def test_execute_order_places_stop_and_tp() -> None:
     assert state.order_id == 111
     assert state.stop_order_id == 222
     assert state.take_profit_order_id == 333
+    assert state.status == OrderStatus.PENDING
+
+
+async def test_cleanup_cancels_tagged_exits_and_tags_new_orders() -> None:
+    bot = _make_bot()
+    signal = _make_signal(OrderSide.LONG)
+    balance = BalanceValidatorStub(Decimal("1000"))
+    trading = TradingStub()
+
+    prefix = _bot_client_prefix(bot.id)
+    trading.open_orders = [
+        {"orderId": 9001, "clientOrderId": f"{prefix}-sl-old"},
+        {"orderId": 9002, "clientOrderId": f"{prefix}-tp-old"},
+        {"orderId": 9003, "clientOrderId": "otherbot-tp"},
+    ]
+
+    executor = OrderExecutor(balance_validator=balance, binance_client=trading)
+    state = await executor.execute_order(bot, signal)
+
+    cancelled_ids = {item["order_id"] for item in trading.cancelled}
+    assert {9001, 9002}.issubset(cancelled_ids)
+    assert 9003 not in cancelled_ids
+
+    stop_call = trading.stop_orders[0]
+    tp_call = trading.tp_orders[0]
+    assert stop_call.get("new_client_order_id", "").startswith(prefix)
+    assert tp_call.get("new_client_order_id", "").startswith(prefix)
     assert state.status == OrderStatus.PENDING
 
 

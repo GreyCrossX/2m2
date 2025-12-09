@@ -80,6 +80,44 @@ class DryRunTradingAdapter:
         self._orders[order_id] = record
         return record
 
+    async def create_stop_market_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        quantity: Decimal,
+        stop_price: Decimal,
+        reduce_only: bool = True,
+        order_type: str = "STOP_MARKET",
+        new_client_order_id: str | None = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "symbol": symbol,
+            "side": getattr(side, "value", str(side)),
+            "quantity": str(quantity),
+            "stopPrice": str(stop_price),
+            "reduceOnly": reduce_only,
+            "order_type": order_type,
+            "newClientOrderId": new_client_order_id,
+        }
+        order_id = int(next(self._id_counter))
+        log.info(
+            "[dry-run] create_stop_market_order | order_id=%s payload=%s",
+            order_id,
+            payload,
+        )
+        record = {
+            "orderId": order_id,
+            "dryRun": True,
+            "payload": payload,
+            "status": "NEW",
+            "executedQty": "0",
+            "stopPrice": payload.get("stopPrice"),
+            "clientOrderId": new_client_order_id,
+        }
+        self._orders[order_id] = record
+        return record
+
     async def create_take_profit_limit(
         self,
         *,
@@ -116,6 +154,7 @@ class DryRunTradingAdapter:
             "executedQty": "0",
             "price": payload.get("price"),
             "stopPrice": payload.get("stopPrice"),
+            "clientOrderId": new_client_order_id,
         }
         self._orders[order_id] = record
         return record

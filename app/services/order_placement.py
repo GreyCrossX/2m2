@@ -42,6 +42,7 @@ class TradingPort(Protocol):
         stop_price: Decimal,
         reduce_only: bool,
         order_type: str,
+        new_client_order_id: Optional[str] = None,
     ) -> dict: ...
 
     async def create_take_profit_limit(
@@ -98,6 +99,8 @@ class OrderPlacementService:
         take_profit_price: Decimal,
         reduce_only: bool = False,
         context: Mapping[str, str] | None = None,
+        stop_client_order_id: Optional[str] = None,
+        tp_client_order_id: Optional[str] = None,
     ) -> TrioOrderResult:
         ctx = _log_context(context)
         exit_side = exit_side_for(side)
@@ -150,6 +153,7 @@ class OrderPlacementService:
                 stop_price=stop_price,
                 reduce_only=True,
                 order_type="STOP_MARKET",
+                new_client_order_id=stop_client_order_id,
             )
             stop_id = (
                 _to_int_or_none(stop_resp.get("orderId"))
@@ -180,6 +184,7 @@ class OrderPlacementService:
                 stop_price=take_profit_price,
                 reduce_only=True,
                 time_in_force="GTC",
+                new_client_order_id=tp_client_order_id,
             )
             tp_id = (
                 _to_int_or_none(tp_resp.get("orderId"))
@@ -218,6 +223,7 @@ class OrderPlacementService:
             stop_order_id=stop_id,
             take_profit_order_id=tp_id,
         )
+        # Note: validation of order ids happens in caller.
 
     async def rollback_orders(
         self,

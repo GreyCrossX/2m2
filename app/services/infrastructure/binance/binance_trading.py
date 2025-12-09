@@ -317,6 +317,7 @@ class BinanceTrading:
         position_side: str = "BOTH",
         order_type: str = "STOP_MARKET",
         reduce_only: bool = True,
+        new_client_order_id: str | None = None,
     ) -> Dict[str, Any]:
         """
         Create a STOP_MARKET or TAKE_PROFIT_MARKET order (reduceOnly implicit via position mode).
@@ -360,6 +361,8 @@ class BinanceTrading:
         payload["reduceOnly"] = bool(reduce_only)
         if working_type:
             payload["workingType"] = working_type
+        if new_client_order_id:
+            payload["newClientOrderId"] = new_client_order_id
 
         try:
             return await self._client.new_order(**payload)

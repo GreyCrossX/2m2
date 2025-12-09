@@ -12,6 +12,7 @@ from ..domain.enums import OrderStatus
 from ..domain.exceptions import WorkerException
 from ..domain.models import BotConfig, OrderState
 from .position_manager import PositionManager
+from .order_executor import _bot_client_prefix
 from ..infrastructure.metrics import WorkerMetrics
 
 log = logging.getLogger(__name__)
@@ -140,11 +141,14 @@ class BinanceOrderMonitor:
             raise
 
     async def _poll_states(self) -> None:
+        bots_seen: set[UUID] = set()
+
         states = await self._orders.list_states_by_statuses(self.ACTIVE_STATUSES)
         for state in states:
             bot = await self._get_bot(state.bot_id)
             if bot is None:
                 continue
+            bots_seen.add(bot.id)
             trading = await self._get_trading(bot)
             if state.status == OrderStatus.PENDING:
                 await self._handle_pending(bot, state, trading)
@@ -161,8 +165,31 @@ class BinanceOrderMonitor:
             bot = await self._get_bot(state.bot_id)
             if bot is None:
                 continue
+            bots_seen.add(bot.id)
             trading = await self._get_trading(bot)
             await self._cleanup_orphan_exits(bot, state, trading)
+
+        # Extra defensive sweep: if no position exists but any order ids remain on any state, cancel them.
+        all_states = await self._orders.list_states_by_statuses(list(OrderStatus))
+        for state in all_states:
+            if not (state.take_profit_order_id or state.stop_order_id or state.order_id):
+                continue
+            bot = await self._get_bot(state.bot_id)
+            if bot is None:
+                continue
+            bots_seen.add(bot.id)
+            if self._positions.get_position(bot.id):
+                continue
+            trading = await self._get_trading(bot)
+            await self._cleanup_orphan_exits(bot, state, trading)
+
+        # Exchange-level sweep: cancel any open orders tagged to these bots via clientOrderId prefix
+        for bot_id in bots_seen:
+            bot = await self._get_bot(bot_id)
+            if bot is None:
+                continue
+            trading = await self._get_trading(bot)
+            await self._cleanup_tagged_exits(bot, trading)
 
     async def _get_bot(self, bot_id: UUID) -> Optional[BotConfig]:
         cached = self._bot_cache.get(bot_id)
@@ -353,6 +380,62 @@ class BinanceOrderMonitor:
             await self._orders.save_state(state)
         return cancelled_any
 
+    async def _cleanup_tagged_exits(
+        self, bot: BotConfig, trading: TradingClient
+    ) -> None:
+        """
+        Cancel any open orders on the exchange whose clientOrderId is tagged
+        with this bot's prefix. This catches lingering TP/SL from previous runs
+        even if state was lost.
+        """
+        prefix = _bot_client_prefix(bot.id)
+        try:
+            open_orders = await trading.list_open_orders(bot.symbol)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "Prefix cleanup skipped (list_open_orders failed) | bot_id=%s err=%s",
+                bot.id,
+                exc,
+            )
+            return
+
+        cancelled = 0
+        for order in open_orders:
+            client_id = str(order.get("clientOrderId") or "")
+            if not client_id.startswith(prefix):
+                continue
+            reduce_only = order.get("reduceOnly")
+            if reduce_only is False:
+                continue
+            oid = order.get("orderId")
+            if oid in (None, ""):
+                continue
+            try:
+                await trading.cancel_order(bot.symbol, int(oid))
+                cancelled += 1
+                log.info(
+                    "Cancelled tagged exchange order | bot_id=%s symbol=%s order_id=%s client_id=%s",
+                    bot.id,
+                    bot.symbol,
+                    oid,
+                    client_id,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning(
+                    "Failed to cancel tagged exchange order | bot_id=%s symbol=%s order_id=%s err=%s",
+                    bot.id,
+                    bot.symbol,
+                    oid,
+                    exc,
+                )
+
+        if cancelled:
+            log.info(
+                "Tagged exit cleanup complete | bot_id=%s cancelled=%d",
+                bot.id,
+                cancelled,
+            )
+
     async def _on_entry_filled(
         self,
         bot: BotConfig,
@@ -373,6 +456,15 @@ class BinanceOrderMonitor:
         state.record_fill(
             quantity=filled_qty, price=fill_price, fill_time=datetime.now(timezone.utc)
         )
+        state.exit_price = fill_price
+        try:
+            entry = state.avg_fill_price or state.trigger_price
+            if state.side == OrderSide.LONG:
+                state.realized_pnl = (fill_price - entry) * filled_qty
+            else:
+                state.realized_pnl = (entry - fill_price) * filled_qty
+        except Exception:
+            state.realized_pnl = Decimal("0")
         state.mark(OrderStatus.FILLED)
         await self._orders.save_state(state)
 
@@ -434,6 +526,15 @@ class BinanceOrderMonitor:
             or filled_order.get("price")
             or filled_order.get("stopPrice")
         )
+        state.exit_price = fill_price
+        try:
+            entry = state.avg_fill_price or state.trigger_price
+            if state.side == OrderSide.LONG:
+                state.realized_pnl = (fill_price - entry) * state.filled_quantity
+            else:
+                state.realized_pnl = (entry - fill_price) * state.filled_quantity
+        except Exception:
+            state.realized_pnl = Decimal("0")
         if self._metrics:
             self._metrics.inc_order_monitor_event(reason)
         log.info(
