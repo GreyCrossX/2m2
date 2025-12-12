@@ -69,11 +69,17 @@ class StubTrading:
         *,
         reduce_only: bool = True,
         order_type: str = "STOP_MARKET",
+        time_in_force: str | None = None,
         new_client_order_id: Optional[str] = None,
     ) -> dict:
         oid = self._next()
         self.created.append(oid)
-        record = {"orderId": oid, "clientOrderId": new_client_order_id}
+        record = {
+            "orderId": oid,
+            "clientOrderId": new_client_order_id,
+            "order_type": order_type,
+            "timeInForce": time_in_force,
+        }
         self.open_orders.append(record)
         return record
 

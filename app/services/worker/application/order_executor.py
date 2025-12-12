@@ -66,6 +66,7 @@ class TradingPort(Protocol):
         *,
         reduce_only: bool = True,
         order_type: str = "STOP_MARKET",
+        time_in_force: str | None = None,
         new_client_order_id: Optional[str] = None,
     ) -> dict: ...
 

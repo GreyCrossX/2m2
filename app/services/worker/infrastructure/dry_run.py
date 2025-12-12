@@ -89,6 +89,7 @@ class DryRunTradingAdapter:
         stop_price: Decimal,
         reduce_only: bool = True,
         order_type: str = "STOP_MARKET",
+        time_in_force: str | None = None,
         new_client_order_id: str | None = None,
     ) -> Dict[str, Any]:
         payload = {
@@ -98,6 +99,7 @@ class DryRunTradingAdapter:
             "stopPrice": str(stop_price),
             "reduceOnly": reduce_only,
             "order_type": order_type,
+            "timeInForce": time_in_force,
             "newClientOrderId": new_client_order_id,
         }
         order_id = int(next(self._id_counter))
@@ -114,6 +116,7 @@ class DryRunTradingAdapter:
             "executedQty": "0",
             "stopPrice": payload.get("stopPrice"),
             "clientOrderId": new_client_order_id,
+            "type": order_type,
         }
         self._orders[order_id] = record
         return record

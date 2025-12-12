@@ -52,6 +52,7 @@ class TradingStub:
         self.tp_orders: list[dict] = []
         self.cancelled: list[dict] = []
         self.open_orders: list[dict] = []
+        self.call_log: list[tuple[str, dict]] = []
         self._filters = filters or {
             "LOT_SIZE": {"stepSize": "0.001", "minQty": "0"},
             "META": {"quantityPrecision": 3},
@@ -70,32 +71,27 @@ class TradingStub:
         if self.entry_exc is not None:
             raise self.entry_exc
         self.limit_orders.append(payload)
+        self.call_log.append(("entry", payload))
         return {"orderId": 111}
 
     async def create_stop_market_order(self, **payload) -> dict:
-        self.stop_orders.append(payload)
-        if self.stop_exc is not None:
+        order_type = payload.get("order_type", "STOP_MARKET")
+        target = self.tp_orders if order_type == "TAKE_PROFIT_MARKET" else self.stop_orders
+        target.append(payload)
+        if self.stop_exc is not None and order_type == "STOP_MARKET":
             raise self.stop_exc
-        if self.fail_stop:
-            raise RuntimeError("stop failed")
-        order = {
-            "orderId": 222,
-            "clientOrderId": payload.get("new_client_order_id"),
-        }
-        self.open_orders.append(order)
-        return order
-
-    async def create_take_profit_limit(self, **payload) -> dict:
-        self.tp_orders.append(payload)
-        if self.tp_exc is not None:
+        if self.tp_exc is not None and order_type == "TAKE_PROFIT_MARKET":
             raise self.tp_exc
-        if self.fail_tp:
+        if self.fail_stop and order_type == "STOP_MARKET":
+            raise RuntimeError("stop failed")
+        if self.fail_tp and order_type == "TAKE_PROFIT_MARKET":
             raise RuntimeError("tp failed")
         order = {
-            "orderId": 333,
+            "orderId": 222 if order_type == "STOP_MARKET" else 333,
             "clientOrderId": payload.get("new_client_order_id"),
         }
         self.open_orders.append(order)
+        self.call_log.append(("stop" if order_type == "STOP_MARKET" else "tp", payload))
         return order
 
     async def get_symbol_filters(self, symbol: str) -> dict:
@@ -277,8 +273,12 @@ async def test_execute_order_places_stop_and_tp() -> None:
 
     tp_call = trading.tp_orders[0]
     expected_tp = signal.trigger + (signal.trigger - signal.stop) * Decimal("1.5")
-    assert tp_call["price"] == expected_tp
+    assert tp_call["stop_price"] == expected_tp
     assert tp_call["side"] == OrderSide.SHORT
+    assert tp_call.get("order_type") == "TAKE_PROFIT_MARKET"
+    assert tp_call.get("time_in_force") == "GTE_GTC"
+    # ensure trio submitted in order: entry -> stop -> tp
+    assert [c[0] for c in trading.call_log[:3]] == ["entry", "stop", "tp"]
 
     assert state.order_id == 111
     assert state.stop_order_id == 222
@@ -330,6 +330,7 @@ async def test_execute_order_rolls_back_when_tp_fails() -> None:
 
     # stop should be placed before failure
     assert trading.stop_orders
+    assert trading.tp_orders  # attempted TP placement captured
     # entry and stop must be cancelled on rollback
     cancelled_ids = {item["order_id"] for item in trading.cancelled}
     assert cancelled_ids == {111, 222}

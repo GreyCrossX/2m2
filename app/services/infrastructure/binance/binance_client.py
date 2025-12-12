@@ -23,7 +23,7 @@ _REDACT_KEYS = {"timestamp", "signature", "recvWindow"}
 _BOOL_FIELDS = {"reduceOnly", "closePosition", "priceProtect"}
 _UPPER_FIELDS = {"symbol", "side", "type", "timeInForce", "positionSide", "workingType"}
 
-DEFAULT_RECV_WINDOW_MS = 5_000
+DEFAULT_RECV_WINDOW_MS = 10_000
 DEFAULT_MAX_CLOCK_SKEW_MS = 1_000
 
 

@@ -19,7 +19,7 @@ _VALID_ORDER_TYPES = {
     "TAKE_PROFIT_MARKET",
     "TAKE_PROFIT",  # futures TP with price + stopPrice
 }
-_VALID_TIME_IN_FORCE = {"GTC", "IOC", "FOK", "GTX"}
+_VALID_TIME_IN_FORCE = {"GTC", "IOC", "FOK", "GTX", "GTE_GTC"}
 _VALID_POSITION_SIDES = {"BOTH", "LONG", "SHORT"}
 _VALID_WORKING_TYPES = {"CONTRACT_PRICE", "MARK_PRICE"}
 
@@ -317,6 +317,7 @@ class BinanceTrading:
         position_side: str = "BOTH",
         order_type: str = "STOP_MARKET",
         reduce_only: bool = True,
+        time_in_force: str | None = None,
         new_client_order_id: str | None = None,
     ) -> Dict[str, Any]:
         """
@@ -361,6 +362,10 @@ class BinanceTrading:
         payload["reduceOnly"] = bool(reduce_only)
         if working_type:
             payload["workingType"] = working_type
+        if time_in_force:
+            payload["timeInForce"] = _validate_choice(
+                time_in_force, _VALID_TIME_IN_FORCE, "time_in_force"
+            )
         if new_client_order_id:
             payload["newClientOrderId"] = new_client_order_id
 

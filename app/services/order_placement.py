@@ -42,6 +42,7 @@ class TradingPort(Protocol):
         stop_price: Decimal,
         reduce_only: bool,
         order_type: str,
+        time_in_force: str | None = None,
         new_client_order_id: Optional[str] = None,
     ) -> dict: ...
 
@@ -153,6 +154,7 @@ class OrderPlacementService:
                 stop_price=stop_price,
                 reduce_only=True,
                 order_type="STOP_MARKET",
+                time_in_force="GTE_GTC",
                 new_client_order_id=stop_client_order_id,
             )
             stop_id = (
@@ -176,14 +178,14 @@ class OrderPlacementService:
             ) from exc
 
         try:
-            tp_resp = await self._trading.create_take_profit_limit(
+            tp_resp = await self._trading.create_stop_market_order(
                 symbol=symbol,
                 side=exit_side,
                 quantity=quantity,
-                price=take_profit_price,
                 stop_price=take_profit_price,
                 reduce_only=True,
-                time_in_force="GTC",
+                order_type="TAKE_PROFIT_MARKET",
+                time_in_force="GTE_GTC",
                 new_client_order_id=tp_client_order_id,
             )
             tp_id = (
@@ -200,22 +202,18 @@ class OrderPlacementService:
                     "side": exit_side.value,
                 },
             )
-        except DomainBadRequest as exc:
-            await self.rollback_orders(symbol, [stop_id, entry_id], context=ctx)
-            raise BinanceBadRequestException(str(exc)) from exc
-        except DomainRateLimit as exc:
-            await self.rollback_orders(symbol, [stop_id, entry_id], context=ctx)
-            raise BinanceRateLimitException(str(exc)) from exc
-        except DomainExchangeDown as exc:
-            await self.rollback_orders(symbol, [stop_id, entry_id], context=ctx)
-            raise BinanceExchangeDownException(str(exc)) from exc
-        except DomainExchangeError as exc:
-            await self.rollback_orders(symbol, [stop_id, entry_id], context=ctx)
-            raise BinanceAPIException(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             await self.rollback_orders(symbol, [stop_id, entry_id], context=ctx)
+            if isinstance(exc, DomainBadRequest):
+                raise BinanceBadRequestException(str(exc)) from exc
+            if isinstance(exc, DomainRateLimit):
+                raise BinanceRateLimitException(str(exc)) from exc
+            if isinstance(exc, DomainExchangeDown):
+                raise BinanceExchangeDownException(str(exc)) from exc
+            if isinstance(exc, DomainExchangeError):
+                raise BinanceAPIException(str(exc)) from exc
             raise BinanceAPIException(
-                f"create_take_profit_limit failed: {exc}"
+                f"create_take_profit_market failed: {exc}"
             ) from exc
 
         return TrioOrderResult(
