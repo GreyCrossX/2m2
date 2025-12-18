@@ -302,8 +302,12 @@ class BinanceUSDS:
         """Return current open orders."""
 
         prepared = self._translate_params(params, self._QUERY_PARAM_ALIASES)
-        method = getattr(self._rest, "open_orders", None) or getattr(
-            self._rest, "current_open_orders", None
+        # SDK method names vary by version.
+        method = (
+            getattr(self._rest, "current_all_open_orders", None)
+            or getattr(self._rest, "current_open_orders", None)
+            or getattr(self._rest, "open_orders", None)
+            or getattr(self._rest, "current_all_open_order", None)
         )
         if method is None:
             return []

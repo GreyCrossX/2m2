@@ -3,16 +3,27 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Protocol
+from typing import (
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+)
 from uuid import UUID
 
-from ..domain.enums import OrderStatus
+from ..domain.enums import OrderSide, OrderStatus, exit_side_for
 from ..domain.exceptions import WorkerException
 from ..domain.models import BotConfig, OrderState
 from .position_manager import PositionManager
-from .order_executor import _bot_client_prefix
+from .order_executor import _bot_client_prefix, _bot_exit_client_id
 from ..infrastructure.metrics import WorkerMetrics
 
 log = logging.getLogger(__name__)
@@ -29,6 +40,8 @@ class OrderGateway(Protocol):
 
 class BotRepository(Protocol):
     async def get_bot(self, bot_id: UUID) -> Optional[BotConfig]: ...
+
+    async def get_enabled_bots(self) -> List[BotConfig]: ...
 
 
 class TradingClient(Protocol):
@@ -48,6 +61,36 @@ def _to_decimal(value: object, default: Decimal = Decimal("0")) -> Decimal:
         return default
 
 
+def _get_any(mapping: Mapping[str, object], *keys: str) -> object | None:
+    for key in keys:
+        if key not in mapping:
+            continue
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _to_bool(value: object) -> bool | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _to_int_or_none(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_exchange_filled(status: str) -> bool:
     normalized = status.upper()
     return normalized in {"FILLED", "PARTIALLY_FILLED"}
@@ -56,6 +99,24 @@ def _is_exchange_filled(status: str) -> bool:
 def _is_exchange_open(status: str) -> bool:
     normalized = status.upper()
     return normalized in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW", "ACCEPTED"}
+
+
+def _is_order_not_found_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(
+        needle in msg
+        for needle in (
+            "unknown order",
+            "order does not exist",
+            "order not found",
+            "unknown order sent",
+        )
+    )
+
+
+def _is_immediate_trigger_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "immediately trigger" in msg or "would immediately trigger" in msg
 
 
 class BinanceOrderMonitor:
@@ -89,6 +150,8 @@ class BinanceOrderMonitor:
         self._bot_cache: Dict[UUID, BotConfig] = {}
         self._trading_cache: Dict[UUID, TradingClient] = {}
         self._trading_lock = asyncio.Lock()
+        self._enabled_bots_refreshed_at: float = 0.0
+        self._enabled_bots_ttl_seconds: float = 60.0
 
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
@@ -141,7 +204,9 @@ class BinanceOrderMonitor:
             raise
 
     async def _poll_states(self) -> None:
+        await self._refresh_enabled_bots_cache()
         bots_seen: set[UUID] = set()
+        active_bots: set[UUID] = set()
 
         states = await self._orders.list_states_by_statuses(self.ACTIVE_STATUSES)
         for state in states:
@@ -149,6 +214,7 @@ class BinanceOrderMonitor:
             if bot is None:
                 continue
             bots_seen.add(bot.id)
+            active_bots.add(bot.id)
             trading = await self._get_trading(bot)
             if state.status == OrderStatus.PENDING:
                 await self._handle_pending(bot, state, trading)
@@ -159,32 +225,41 @@ class BinanceOrderMonitor:
         closed_states = await self._orders.list_states_by_statuses(
             self._CLOSED_STATUSES
         )
+        recovered: set[UUID] = set()
         for state in closed_states:
-            if not (state.take_profit_order_id or state.stop_order_id):
+            if state.bot_id in recovered:
+                continue
+            if not (
+                state.take_profit_order_id
+                or state.stop_order_id
+                or state.filled_quantity > 0
+                or state.avg_fill_price is not None
+            ):
                 continue
             bot = await self._get_bot(state.bot_id)
             if bot is None:
                 continue
             bots_seen.add(bot.id)
             trading = await self._get_trading(bot)
-            await self._cleanup_orphan_exits(bot, state, trading)
+            if await self._exchange_has_open_position(trading, state.symbol):
+                if state.filled_quantity > 0 or state.avg_fill_price is not None:
+                    await self._recover_protective_orders(bot, state, trading)
+                    recovered.add(state.bot_id)
+                else:
+                    log.warning(
+                        "Closed state but exchange position open; skipping cleanup | bot_id=%s symbol=%s status=%s",
+                        bot.id,
+                        state.symbol,
+                        state.status.value,
+                    )
+                continue
 
-        # Extra defensive sweep: if no position exists but any order ids remain on any state, cancel them.
-        all_states = await self._orders.list_states_by_statuses(list(OrderStatus))
-        for state in all_states:
-            if not (state.take_profit_order_id or state.stop_order_id or state.order_id):
-                continue
-            bot = await self._get_bot(state.bot_id)
-            if bot is None:
-                continue
-            bots_seen.add(bot.id)
-            if self._positions.get_position(bot.id):
-                continue
-            trading = await self._get_trading(bot)
-            await self._cleanup_orphan_exits(bot, state, trading)
+            if state.take_profit_order_id or state.stop_order_id:
+                await self._cleanup_orphan_exits(bot, state, trading)
 
         # Exchange-level sweep: cancel any open orders tagged to these bots via clientOrderId prefix
-        for bot_id in bots_seen:
+        # (works even if we lost state, but only when no exchange position exists).
+        for bot_id in set(self._bot_cache.keys()) - active_bots:
             bot = await self._get_bot(bot_id)
             if bot is None:
                 continue
@@ -199,6 +274,31 @@ class BinanceOrderMonitor:
         if bot is not None:
             self._bot_cache[bot_id] = bot
         return bot
+
+    async def _refresh_enabled_bots_cache(self) -> None:
+        """
+        Periodically refresh the bot cache from the DB so we can clean up tagged
+        exit orders even when there are no tracked states (e.g., after a restart).
+        """
+        now = time.monotonic()
+        if (now - self._enabled_bots_refreshed_at) < self._enabled_bots_ttl_seconds:
+            return
+
+        getter = getattr(self._bots, "get_enabled_bots", None)
+        if not callable(getter):
+            self._enabled_bots_refreshed_at = now
+            return
+
+        try:
+            bots = await getter()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("Failed to refresh enabled bots | err=%s", exc)
+            self._enabled_bots_refreshed_at = now
+            return
+
+        for bot in bots:
+            self._bot_cache[bot.id] = bot
+        self._enabled_bots_refreshed_at = now
 
     async def _get_trading(self, bot: BotConfig) -> TradingClient:
         cached = self._trading_cache.get(bot.id)
@@ -252,8 +352,13 @@ class BinanceOrderMonitor:
             return
 
         status = str(info.get("status", "")).upper()
-        executed_qty = _to_decimal(info.get("executedQty") or info.get("cumQty"))
-        if _is_exchange_filled(status) and executed_qty > 0:
+        executed_qty = _to_decimal(
+            _get_any(info, "executed_qty", "executedQty", "cum_qty", "cumQty")
+        )
+        # If any quantity was executed, treat it as a fill even if the order was later canceled/expired.
+        if executed_qty > 0 and (
+            _is_exchange_filled(status) or not _is_exchange_open(status)
+        ):
             await self._on_entry_filled(bot, state, trading, info)
         elif not _is_exchange_open(status) and allow_transition:
             log.info(
@@ -273,14 +378,26 @@ class BinanceOrderMonitor:
         trading: TradingClient,
     ) -> None:
         await self._ensure_position(bot, state, trading)
+
+        # If we *think* we have a position (in-memory), but the exchange reports none,
+        # the position was likely closed externally (manual close, liquidation, etc).
+        if (
+            self._positions.get_position(bot.id) is not None
+            and state.status in (OrderStatus.ARMED, OrderStatus.FILLED)
+            and not await self._exchange_has_open_position(trading, state.symbol)
+        ):
+            await self._handle_external_position_close(bot, state, trading)
+            return
+
         # If the position is gone but protective orders remain, clean them up.
         if (
             self._positions.get_position(bot.id) is None
             and state.status in (OrderStatus.ARMED, OrderStatus.FILLED)
             and (state.take_profit_order_id or state.stop_order_id)
         ):
-            if await self._cleanup_orphan_exits(bot, state, trading):
-                return
+            if not await self._exchange_has_open_position(trading, state.symbol):
+                if await self._cleanup_orphan_exits(bot, state, trading):
+                    return
         for label, oid in (
             ("take_profit", state.take_profit_order_id),
             ("stop", state.stop_order_id),
@@ -310,9 +427,11 @@ class BinanceOrderMonitor:
         if state.filled_quantity <= 0 or state.avg_fill_price is None:
             info = await self._fetch_order(trading, state.symbol, state.order_id)
             if info:
-                filled_qty = _to_decimal(info.get("executedQty") or info.get("cumQty"))
+                filled_qty = _to_decimal(
+                    _get_any(info, "executed_qty", "executedQty", "cum_qty", "cumQty")
+                )
                 fill_price = _to_decimal(
-                    info.get("avgPrice") or info.get("avg_price") or info.get("price"),
+                    _get_any(info, "avg_price", "avgPrice", "price"),
                     state.trigger_price,
                 )
                 if filled_qty > 0:
@@ -361,6 +480,16 @@ class BinanceOrderMonitor:
                     label,
                 )
             except Exception as exc:  # pragma: no cover - defensive cleanup
+                if _is_order_not_found_error(exc):
+                    cancelled_any = True
+                    log.info(
+                        "Orphan exit order already absent | bot_id=%s symbol=%s order_id=%s label=%s",
+                        bot.id,
+                        state.symbol,
+                        oid,
+                        label,
+                    )
+                    continue
                 log.warning(
                     "Failed to cancel orphan %s order | bot_id=%s symbol=%s order_id=%s err=%s",
                     label,
@@ -380,6 +509,52 @@ class BinanceOrderMonitor:
             await self._orders.save_state(state)
         return cancelled_any
 
+    async def _handle_external_position_close(
+        self,
+        bot: BotConfig,
+        state: OrderState,
+        trading: TradingClient,
+    ) -> None:
+        """
+        Handle a position that disappeared on the exchange while we still had it in memory.
+
+        Best-effort cancels exit orders and clears local position to avoid accumulating
+        stale TP/SL orders and blocking future ARM signals.
+        """
+        await self._cleanup_orphan_exits(bot, state, trading)
+        await self._positions.close_position(bot.id, "exchange_position_closed")
+        log.info(
+            "Exchange position closed; local position cleared | bot_id=%s symbol=%s",
+            bot.id,
+            state.symbol,
+        )
+        if self._metrics:
+            self._metrics.inc_order_monitor_event("exchange_position_closed")
+
+    async def _exchange_has_open_position(
+        self, trading: TradingClient, symbol: str
+    ) -> bool:
+        """
+        Best-effort exchange position check.
+
+        If the trading adapter supports ``has_open_position()``, use it to avoid
+        cancelling protective orders when a position still exists (e.g., after a restart
+        when in-memory positions are empty). On failures, assume a position may exist
+        to avoid unsafe cancellations.
+        """
+        checker = getattr(trading, "has_open_position", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(await checker(symbol))
+        except Exception as exc:  # pragma: no cover - defensive / network errors
+            log.warning(
+                "Open position check failed; skipping cleanup | symbol=%s err=%s",
+                symbol,
+                exc,
+            )
+            return True
+
     async def _cleanup_tagged_exits(
         self, bot: BotConfig, trading: TradingClient
     ) -> None:
@@ -389,6 +564,8 @@ class BinanceOrderMonitor:
         even if state was lost.
         """
         prefix = _bot_client_prefix(bot.id)
+        if await self._exchange_has_open_position(trading, bot.symbol):
+            return
         try:
             open_orders = await trading.list_open_orders(bot.symbol)
         except Exception as exc:  # pragma: no cover - defensive
@@ -401,13 +578,13 @@ class BinanceOrderMonitor:
 
         cancelled = 0
         for order in open_orders:
-            client_id = str(order.get("clientOrderId") or "")
+            client_id = str(_get_any(order, "client_order_id", "clientOrderId") or "")
             if not client_id.startswith(prefix):
                 continue
-            reduce_only = order.get("reduceOnly")
+            reduce_only = _to_bool(_get_any(order, "reduce_only", "reduceOnly"))
             if reduce_only is False:
                 continue
-            oid = order.get("orderId")
+            oid = _get_any(order, "order_id", "orderId")
             if oid in (None, ""):
                 continue
             try:
@@ -436,6 +613,271 @@ class BinanceOrderMonitor:
                 cancelled,
             )
 
+    async def _failsafe_close_position(
+        self,
+        bot: BotConfig,
+        state: OrderState,
+        trading: TradingClient,
+        *,
+        quantity: Decimal,
+        reason: str,
+    ) -> None:
+        closer = getattr(trading, "close_position_market", None)
+        if not callable(closer):
+            log.error(
+                "Failsafe close unavailable | bot_id=%s symbol=%s reason=%s",
+                bot.id,
+                bot.symbol,
+                reason,
+            )
+            return
+
+        exit_side = exit_side_for(state.side)
+        try:
+            await closer(bot.symbol, exit_side, quantity)
+            log.error(
+                "Failsafe position close submitted | bot_id=%s symbol=%s side=%s qty=%s reason=%s",
+                bot.id,
+                bot.symbol,
+                exit_side.value,
+                str(quantity),
+                reason,
+            )
+        except Exception as exc:  # pragma: no cover - network/exchange errors
+            log.error(
+                "Failsafe close failed | bot_id=%s symbol=%s qty=%s reason=%s err=%s",
+                bot.id,
+                bot.symbol,
+                str(quantity),
+                reason,
+                exc,
+            )
+            return
+
+        await self._positions.close_position(bot.id, "failsafe_close")
+        state.mark(OrderStatus.CANCELLED)
+        await self._orders.save_state(state)
+
+    async def _recover_protective_orders(
+        self, bot: BotConfig, state: OrderState, trading: TradingClient
+    ) -> None:
+        if state.stop_price <= 0:
+            log.warning(
+                "Recovery skipped (invalid stop) | bot_id=%s symbol=%s stop=%s",
+                bot.id,
+                state.symbol,
+                str(state.stop_price),
+            )
+            return
+
+        if state.filled_quantity <= 0 or state.avg_fill_price is None:
+            info = await self._fetch_order(trading, state.symbol, state.order_id)
+            if info:
+                filled_qty = _to_decimal(
+                    _get_any(info, "executed_qty", "executedQty", "cum_qty", "cumQty")
+                )
+                fill_price = _to_decimal(
+                    _get_any(info, "avg_price", "avgPrice", "price"),
+                    state.trigger_price,
+                )
+                if filled_qty > 0:
+                    state.quantity = filled_qty
+                    state.record_fill(quantity=filled_qty, price=fill_price)
+
+        qty = state.filled_quantity if state.filled_quantity > 0 else state.quantity
+        if qty <= 0:
+            log.warning(
+                "Recovery skipped (unknown qty) | bot_id=%s symbol=%s",
+                bot.id,
+                state.symbol,
+            )
+            return
+
+        allow_pyramiding = getattr(bot, "allow_pyramiding", False)
+        tp_r_multiple = getattr(bot, "tp_r_multiple", None)
+        position = self._positions.get_position(bot.id)
+        if position is None:
+            try:
+                position = await self._positions.open_position(
+                    bot.id,
+                    replace(state, status=OrderStatus.FILLED),
+                    allow_pyramiding=allow_pyramiding,
+                    tp_r_multiple=tp_r_multiple,
+                )
+            except WorkerException as exc:
+                log.warning(
+                    "Recovery failed to rehydrate position | bot_id=%s symbol=%s err=%s",
+                    bot.id,
+                    state.symbol,
+                    exc,
+                )
+                return
+
+        prefix = _bot_client_prefix(bot.id)
+        try:
+            open_orders = await trading.list_open_orders(bot.symbol)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "Recovery list_open_orders failed | bot_id=%s symbol=%s err=%s",
+                bot.id,
+                bot.symbol,
+                exc,
+            )
+            open_orders = []
+
+        extra_order_ids: list[int] = []
+        for order in open_orders:
+            client_id = str(_get_any(order, "client_order_id", "clientOrderId") or "")
+            if not client_id.startswith(prefix):
+                continue
+            reduce_only = _to_bool(_get_any(order, "reduce_only", "reduceOnly"))
+            if reduce_only is False:
+                continue
+            oid = _to_int_or_none(_get_any(order, "order_id", "orderId"))
+            if oid is None:
+                continue
+            order_type = str(order.get("type") or "").upper()
+            if order_type == "STOP_MARKET":
+                if state.stop_order_id is None:
+                    state.stop_order_id = oid
+                else:
+                    extra_order_ids.append(oid)
+            elif order_type == "TAKE_PROFIT_MARKET":
+                if state.take_profit_order_id is None:
+                    state.take_profit_order_id = oid
+                else:
+                    extra_order_ids.append(oid)
+
+        for oid in extra_order_ids:
+            try:
+                await trading.cancel_order(bot.symbol, int(oid))
+                log.info(
+                    "Recovery cancelled extra tagged exit | bot_id=%s symbol=%s order_id=%s",
+                    bot.id,
+                    bot.symbol,
+                    oid,
+                )
+            except Exception:
+                continue
+
+        creator = getattr(trading, "create_stop_market_order", None)
+        if not callable(creator):
+            log.warning(
+                "Recovery skipped (trading cannot create exits) | bot_id=%s symbol=%s",
+                bot.id,
+                bot.symbol,
+            )
+            return
+
+        exit_side = exit_side_for(state.side)
+        if state.stop_order_id is None:
+            stop_client_id = _bot_exit_client_id(bot.id, "sl")
+            try:
+                resp = await creator(
+                    symbol=bot.symbol,
+                    side=exit_side,
+                    quantity=qty,
+                    stop_price=state.stop_price,
+                    reduce_only=True,
+                    order_type="STOP_MARKET",
+                    time_in_force="GTE_GTC",
+                    new_client_order_id=stop_client_id,
+                )
+                state.stop_order_id = _to_int_or_none(
+                    _get_any(resp, "order_id", "orderId")
+                )
+            except Exception as exc:  # pragma: no cover - defensive / exchange errors
+                if _is_immediate_trigger_error(exc):
+                    await self._failsafe_close_position(
+                        bot,
+                        state,
+                        trading,
+                        quantity=qty,
+                        reason="recovery_stop_immediate_trigger",
+                    )
+                    return
+                log.warning(
+                    "Recovery stop create failed | bot_id=%s symbol=%s err=%s",
+                    bot.id,
+                    bot.symbol,
+                    exc,
+                )
+                return
+
+            if state.stop_order_id is None:
+                log.warning(
+                    "Recovery stop returned no id; closing position | bot_id=%s symbol=%s",
+                    bot.id,
+                    bot.symbol,
+                )
+                await self._failsafe_close_position(
+                    bot,
+                    state,
+                    trading,
+                    quantity=qty,
+                    reason="recovery_stop_missing_id",
+                )
+                return
+
+        if state.take_profit_order_id is None:
+            tp_client_id = _bot_exit_client_id(bot.id, "tp")
+            try:
+                resp = await creator(
+                    symbol=bot.symbol,
+                    side=exit_side,
+                    quantity=qty,
+                    stop_price=position.take_profit,
+                    reduce_only=True,
+                    order_type="TAKE_PROFIT_MARKET",
+                    time_in_force="GTE_GTC",
+                    new_client_order_id=tp_client_id,
+                )
+                state.take_profit_order_id = _to_int_or_none(
+                    _get_any(resp, "order_id", "orderId")
+                )
+            except Exception as exc:  # pragma: no cover - defensive / exchange errors
+                if _is_immediate_trigger_error(exc):
+                    await self._failsafe_close_position(
+                        bot,
+                        state,
+                        trading,
+                        quantity=qty,
+                        reason="recovery_tp_immediate_trigger",
+                    )
+                    return
+                log.warning(
+                    "Recovery take-profit create failed | bot_id=%s symbol=%s err=%s",
+                    bot.id,
+                    bot.symbol,
+                    exc,
+                )
+                return
+
+            if state.take_profit_order_id is None:
+                log.warning(
+                    "Recovery tp returned no id; closing position | bot_id=%s symbol=%s",
+                    bot.id,
+                    bot.symbol,
+                )
+                await self._failsafe_close_position(
+                    bot,
+                    state,
+                    trading,
+                    quantity=qty,
+                    reason="recovery_tp_missing_id",
+                )
+                return
+
+        state.mark(OrderStatus.ARMED)
+        await self._orders.save_state(state)
+        log.warning(
+            "Recovered missing exits for open position | bot_id=%s symbol=%s stop_id=%s tp_id=%s",
+            bot.id,
+            bot.symbol,
+            state.stop_order_id,
+            state.take_profit_order_id,
+        )
+
     async def _on_entry_filled(
         self,
         bot: BotConfig,
@@ -444,10 +886,18 @@ class BinanceOrderMonitor:
         info: dict,
     ) -> None:
         filled_qty = _to_decimal(
-            info.get("executedQty") or info.get("cumQty") or info.get("origQty")
+            _get_any(
+                info,
+                "executed_qty",
+                "executedQty",
+                "cum_qty",
+                "cumQty",
+                "orig_qty",
+                "origQty",
+            )
         )
         fill_price = _to_decimal(
-            info.get("avgPrice") or info.get("avg_price") or info.get("price"),
+            _get_any(info, "avg_price", "avgPrice", "price"),
             state.trigger_price,
         )
         if filled_qty <= 0:
@@ -522,9 +972,14 @@ class BinanceOrderMonitor:
         await self._orders.save_state(state)
         await self._positions.close_position(bot.id, reason)
         fill_price = _to_decimal(
-            filled_order.get("avgPrice")
-            or filled_order.get("price")
-            or filled_order.get("stopPrice")
+            _get_any(
+                filled_order,
+                "avg_price",
+                "avgPrice",
+                "price",
+                "stop_price",
+                "stopPrice",
+            )
         )
         state.exit_price = fill_price
         try:

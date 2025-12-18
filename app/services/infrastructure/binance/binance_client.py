@@ -401,6 +401,7 @@ class BinanceClient:
         validated = validate_query_or_cancel_payload(
             self._attach_timing({"symbol": params.get("symbol"), "type": "open_orders"})
         )
+        validated.pop("type", None)
         result = await self._call(self._gateway.open_orders, **validated)
         if isinstance(result, list):
             return result

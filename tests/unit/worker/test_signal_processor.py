@@ -185,6 +185,46 @@ async def test_disarm_cancels_all_related_orders() -> None:
     assert orders.saved[0].status == OrderStatus.CANCELLED
 
 
+async def test_disarm_does_not_cancel_armed_orders() -> None:
+    bot = _make_bot()
+    state = OrderState(
+        bot_id=bot.id,
+        signal_id="sig-1",
+        status=OrderStatus.ARMED,
+        side=OrderSide.LONG,
+        symbol="BTCUSDT",
+        trigger_price=Decimal("100"),
+        stop_price=Decimal("95"),
+        quantity=Decimal("0.5"),
+        order_id=111,
+        stop_order_id=222,
+        take_profit_order_id=333,
+    )
+
+    router = RouterStub([bot.id])
+    bots = BotRepositoryStub(bot)
+    orders = OrderGatewayStub([state])
+    trading = TradingStub()
+
+    async def trading_factory(_: BotConfig):
+        return trading
+
+    processor = SignalProcessor(
+        router,
+        bots,
+        order_executor=OrderExecutorStub(),
+        order_gateway=orders,
+        trading_factory=trading_factory,
+    )
+
+    disarm = _disarm_signal(OrderSide.LONG)
+    cancelled = await processor.process_disarm_signal(disarm, "1-0")
+
+    assert cancelled == []
+    assert trading.cancelled == []
+    assert orders.saved == []
+
+
 async def test_arm_signal_skips_when_active_trade_present() -> None:
     bot = _make_bot()
     active_state = OrderState(

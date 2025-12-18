@@ -1,7 +1,6 @@
 from decimal import Decimal
 from typing import List
 
-import pytest
 
 from app.services.calc2.models import ArmSignal
 from app.services.calc2.processors.symbol_processor import SymbolProcessor

@@ -1,5 +1,3 @@
-import pytest
-
 from dataclasses import replace
 from decimal import Decimal
 from uuid import uuid4

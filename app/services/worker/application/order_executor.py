@@ -292,10 +292,12 @@ class OrderExecutor:
 
         cancelled = 0
         for order in open_orders:
-            client_id = str(order.get("clientOrderId") or "")
+            client_id = str(
+                order.get("client_order_id") or order.get("clientOrderId") or ""
+            )
             if not client_id.startswith(prefix):
                 continue
-            order_id = order.get("orderId")
+            order_id = order.get("order_id") or order.get("orderId")
             if order_id in (None, ""):
                 continue
             try:
@@ -709,7 +711,9 @@ class OrderExecutor:
             )
 
         # Validate that exchange returned ids; otherwise treat as failure and rollback defensively.
-        if not (trio.entry_order_id and trio.stop_order_id and trio.take_profit_order_id):
+        if not (
+            trio.entry_order_id and trio.stop_order_id and trio.take_profit_order_id
+        ):
             log.error(
                 "Order placement missing order ids, rolling back | entry=%s stop=%s tp=%s | %s",
                 trio.entry_order_id,

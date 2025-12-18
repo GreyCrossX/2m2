@@ -80,6 +80,15 @@ def _to_int_or_none(value: object) -> Optional[int]:
         return None
 
 
+def _extract_order_id(resp: object) -> Optional[int]:
+    if not isinstance(resp, dict):
+        return None
+    value = resp.get("orderId")
+    if value in (None, ""):
+        value = resp.get("order_id")
+    return _to_int_or_none(value)
+
+
 class OrderPlacementService:
     """Provide atomic placement and rollback for entry/stop/take-profit orders."""
 
@@ -128,11 +137,7 @@ class OrderPlacementService:
                 f"Unexpected create_limit_order error: {exc}"
             ) from exc
 
-        entry_id = (
-            _to_int_or_none(entry_resp.get("orderId"))
-            if isinstance(entry_resp, dict)
-            else None
-        )
+        entry_id = _extract_order_id(entry_resp)
         self._log.info(
             "order.entry_placed",
             extra={
@@ -157,11 +162,7 @@ class OrderPlacementService:
                 time_in_force="GTE_GTC",
                 new_client_order_id=stop_client_order_id,
             )
-            stop_id = (
-                _to_int_or_none(stop_resp.get("orderId"))
-                if isinstance(stop_resp, dict)
-                else None
-            )
+            stop_id = _extract_order_id(stop_resp)
             self._log.info(
                 "order.stop_placed",
                 extra={
@@ -188,11 +189,7 @@ class OrderPlacementService:
                 time_in_force="GTE_GTC",
                 new_client_order_id=tp_client_order_id,
             )
-            tp_id = (
-                _to_int_or_none(tp_resp.get("orderId"))
-                if isinstance(tp_resp, dict)
-                else None
-            )
+            tp_id = _extract_order_id(tp_resp)
             self._log.info(
                 "order.tp_placed",
                 extra={

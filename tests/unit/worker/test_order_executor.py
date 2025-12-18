@@ -1,4 +1,3 @@
-import pytest
 from dataclasses import replace
 from decimal import Decimal
 from datetime import datetime, timezone
@@ -76,7 +75,9 @@ class TradingStub:
 
     async def create_stop_market_order(self, **payload) -> dict:
         order_type = payload.get("order_type", "STOP_MARKET")
-        target = self.tp_orders if order_type == "TAKE_PROFIT_MARKET" else self.stop_orders
+        target = (
+            self.tp_orders if order_type == "TAKE_PROFIT_MARKET" else self.stop_orders
+        )
         target.append(payload)
         if self.stop_exc is not None and order_type == "STOP_MARKET":
             raise self.stop_exc
@@ -294,9 +295,9 @@ async def test_cleanup_cancels_tagged_exits_and_tags_new_orders() -> None:
 
     prefix = _bot_client_prefix(bot.id)
     trading.open_orders = [
-        {"orderId": 9001, "clientOrderId": f"{prefix}-sl-old"},
-        {"orderId": 9002, "clientOrderId": f"{prefix}-tp-old"},
-        {"orderId": 9003, "clientOrderId": "otherbot-tp"},
+        {"order_id": 9001, "client_order_id": f"{prefix}-sl-old"},
+        {"order_id": 9002, "client_order_id": f"{prefix}-tp-old"},
+        {"order_id": 9003, "client_order_id": "otherbot-tp"},
     ]
 
     executor = OrderExecutor(balance_validator=balance, binance_client=trading)

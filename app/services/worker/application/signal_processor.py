@@ -60,6 +60,22 @@ class PositionStore(Protocol):
 class TradingPort(Protocol):
     async def cancel_order(self, symbol: str, order_id: int) -> None: ...
 
+    async def get_order(self, symbol: str, order_id: int) -> dict: ...
+
+
+def _to_decimal(value: object) -> Decimal:
+    try:
+        if value in (None, ""):
+            return Decimal("0")
+        return Decimal(str(value))
+    except Exception:
+        return Decimal("0")
+
+
+def _is_exchange_open(status: str) -> bool:
+    normalized = status.upper()
+    return normalized in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW", "ACCEPTED"}
+
 
 class SignalProcessor:
     """Orchestrates ARM/DISARM handling across subscribed bots."""
@@ -367,6 +383,7 @@ class SignalProcessor:
                 bot_id,
                 sig.symbol,
                 sig.prev_side,  # OrderSide
+                statuses=(OrderStatus.PENDING,),
             )
 
             logger.info(
@@ -395,7 +412,7 @@ class SignalProcessor:
                     )
                     continue
 
-                if state.status not in (OrderStatus.PENDING, OrderStatus.ARMED):
+                if state.status is not OrderStatus.PENDING:
                     logger.debug(
                         "Order not active | status=%s - skipping", state.status.value
                     )
@@ -412,6 +429,63 @@ class SignalProcessor:
                     continue
 
                 trading = await self._trading_factory(bot)
+
+                # Safety: If entry already filled (even partially), do not cancel TP/SL.
+                executed_qty = state.filled_quantity
+                entry_status = ""
+                getter = getattr(trading, "get_order", None)
+                if state.order_id and callable(getter):
+                    try:
+                        info = await getter(state.symbol, int(state.order_id))
+                        entry_status = str(info.get("status", "")).upper()
+                        executed_qty = _to_decimal(
+                            info.get("executed_qty")
+                            or info.get("executedQty")
+                            or info.get("cum_qty")
+                            or info.get("cumQty")
+                        )
+                    except Exception as exc:  # pragma: no cover - network/SDK errors
+                        logger.warning(
+                            "DISARM entry lookup failed; proceeding cautiously | bot_id=%s order_id=%s err=%s | %s",
+                            bot.id,
+                            state.order_id,
+                            exc,
+                            log_ctx,
+                        )
+
+                if executed_qty > 0:
+                    # If the entry is still open (partially filled), cancel remaining entry only.
+                    if state.order_id and _is_exchange_open(entry_status):
+                        try:
+                            await trading.cancel_order(
+                                symbol=state.symbol, order_id=int(state.order_id)
+                            )
+                            cancelled.append(str(state.order_id))
+                            logger.info(
+                                "Entry order cancelled (partial fill) | bot_id=%s order_id=%s | %s",
+                                bot.id,
+                                state.order_id,
+                                log_ctx,
+                            )
+                        except Exception as exc:  # pragma: no cover - defensive
+                            logger.warning(
+                                "Cancel entry after partial fill failed | bot_id=%s order_id=%s err=%s | %s",
+                                bot.id,
+                                state.order_id,
+                                exc,
+                                log_ctx,
+                            )
+
+                    logger.info(
+                        "DISARM skipped for filled entry (keeping TP/SL) | bot_id=%s order_id=%s executed_qty=%s status=%s | %s",
+                        bot.id,
+                        state.order_id or "N/A",
+                        str(executed_qty),
+                        entry_status or state.status.value,
+                        log_ctx,
+                    )
+                    continue
+
                 cancel_targets = [
                     ("entry", state.order_id),
                     ("stop", state.stop_order_id),

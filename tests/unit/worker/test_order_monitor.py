@@ -6,7 +6,6 @@ from decimal import Decimal
 from typing import Dict, Iterable, List, Optional
 from uuid import UUID, uuid4
 
-import pytest
 
 from app.services.worker.application.order_monitor import BinanceOrderMonitor
 from app.services.worker.application.position_manager import PositionManager
@@ -22,6 +21,9 @@ class BotRepoStub:
         if bot_id == self._bot.id:
             return self._bot
         return None
+
+    async def get_enabled_bots(self) -> List[BotConfig]:
+        return [self._bot] if self._bot.enabled else []
 
 
 class OrderGatewayStub:
@@ -60,13 +62,13 @@ class TradingStub:
         stop_price: str | None = None,
     ) -> None:
         payload = {
-            "orderId": order_id,
+            "order_id": order_id,
             "status": status,
-            "executedQty": executed,
-            "avgPrice": price,
+            "executed_qty": executed,
+            "avg_price": price,
         }
         if stop_price is not None:
-            payload["stopPrice"] = stop_price
+            payload["stop_price"] = stop_price
         self.orders[order_id] = payload
 
     async def get_order(self, symbol: str, order_id: int) -> Dict[str, str]:
@@ -87,6 +89,16 @@ class TradingStub:
             for o in self.orders.values()
             if o.get("status") not in {"CANCELED", "FILLED"}
         ]
+
+
+class TradingStubWithPosition(TradingStub):
+    async def has_open_position(self, symbol: str) -> bool:
+        return True
+
+
+class TradingStubWithoutPosition(TradingStub):
+    async def has_open_position(self, symbol: str) -> bool:
+        return False
 
 
 def _bot() -> BotConfig:
@@ -180,6 +192,108 @@ async def test_exit_fill_closes_position_and_cancels_other_leg() -> None:
     assert updated.status == OrderStatus.CANCELLED
     assert positions.get_position(bot.id) is None
     assert 2 in trading.cancelled
+
+
+async def test_pending_state_does_not_cancel_protective_orders() -> None:
+    bot = _bot()
+    trading = TradingStub()
+    trading.set_order(1, status="NEW", executed="0", price="100")
+    trading.set_order(2, status="NEW", executed="0", price="0", stop_price="95")
+    trading.set_order(3, status="NEW", executed="0", price="0", stop_price="105")
+
+    state = replace(
+        _order_state(bot, OrderStatus.PENDING, order_id=1),
+        stop_order_id=2,
+        take_profit_order_id=3,
+    )
+    gateway = OrderGatewayStub([state])
+    positions = PositionManager()
+
+    monitor = BinanceOrderMonitor(
+        bot_repository=BotRepoStub(bot),
+        order_gateway=gateway,
+        position_manager=positions,
+        trading_factory=lambda _bot: asyncio.sleep(0, trading),
+        poll_interval=0.1,
+    )
+
+    await monitor.run_once()
+
+    stored = gateway.states[0]
+    assert stored.status == OrderStatus.PENDING
+    assert stored.stop_order_id == 2
+    assert stored.take_profit_order_id == 3
+    assert trading.cancelled == []
+
+
+async def test_does_not_cancel_exits_when_exchange_position_open() -> None:
+    bot = _bot()
+    trading = TradingStubWithPosition()
+    trading.set_order(1, status="FILLED", executed="1", price="101")
+    trading.set_order(2, status="NEW", executed="0", price="0", stop_price="98")
+    trading.set_order(3, status="NEW", executed="0", price="0", stop_price="105")
+
+    state = replace(
+        _order_state(bot, OrderStatus.ARMED, order_id=1),
+        stop_order_id=2,
+        take_profit_order_id=3,
+        stop_price=Decimal("0"),
+        filled_quantity=Decimal("1"),
+        avg_fill_price=Decimal("101"),
+    )
+    gateway = OrderGatewayStub([state])
+    positions = PositionManager()
+
+    monitor = BinanceOrderMonitor(
+        bot_repository=BotRepoStub(bot),
+        order_gateway=gateway,
+        position_manager=positions,
+        trading_factory=lambda _bot: asyncio.sleep(0, trading),
+        poll_interval=0.1,
+    )
+
+    await monitor.run_once()
+
+    stored = gateway.states[0]
+    assert stored.stop_order_id == 2
+    assert stored.take_profit_order_id == 3
+    assert trading.cancelled == []
+
+
+async def test_cancels_exits_when_exchange_position_closed_externally() -> None:
+    bot = _bot()
+    trading = TradingStubWithoutPosition()
+    trading.set_order(1, status="FILLED", executed="1", price="101")
+    trading.set_order(2, status="NEW", executed="0", price="0", stop_price="98")
+    trading.set_order(3, status="NEW", executed="0", price="0", stop_price="105")
+
+    state = replace(
+        _order_state(bot, OrderStatus.ARMED, order_id=1),
+        stop_order_id=2,
+        take_profit_order_id=3,
+        filled_quantity=Decimal("1"),
+        avg_fill_price=Decimal("101"),
+    )
+    gateway = OrderGatewayStub([state])
+    positions = PositionManager()
+    await positions.open_position(bot.id, replace(state, status=OrderStatus.FILLED))
+
+    monitor = BinanceOrderMonitor(
+        bot_repository=BotRepoStub(bot),
+        order_gateway=gateway,
+        position_manager=positions,
+        trading_factory=lambda _bot: asyncio.sleep(0, trading),
+        poll_interval=0.1,
+    )
+
+    await monitor.run_once()
+
+    updated = gateway.states[0]
+    assert updated.status == OrderStatus.CANCELLED
+    assert updated.stop_order_id is None
+    assert updated.take_profit_order_id is None
+    assert positions.get_position(bot.id) is None
+    assert set(trading.cancelled) == {2, 3}
 
 
 async def test_sync_on_startup_rehydrates_position() -> None:

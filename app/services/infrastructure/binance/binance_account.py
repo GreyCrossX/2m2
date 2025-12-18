@@ -119,12 +119,29 @@ class BinanceAccount:
 
         for risk in risks:
             try:
-                qty = _to_decimal_safe(risk.get("positionAmt", "0"))
+                qty = _to_decimal_safe(
+                    risk.get("position_amt") or risk.get("positionAmt") or "0"
+                )
                 if qty == 0:
                     continue
 
-                entry_price = _to_decimal_safe(risk.get("entryPrice", "0"))
-                leverage = _to_decimal_safe(risk.get("leverage", "1")) or Decimal("1")
+                # Prefer API-provided margin fields when available (new connector uses snake_case).
+                margin_used = _to_decimal_safe(
+                    risk.get("position_initial_margin")
+                    or risk.get("positionInitialMargin")
+                    or risk.get("initial_margin")
+                    or risk.get("initialMargin")
+                    or "0"
+                )
+                if margin_used > 0:
+                    total_used += margin_used
+                    continue
+
+                # Fallback: approximate from qty/entry/leverage when margin fields aren't present.
+                entry_price = _to_decimal_safe(
+                    risk.get("entry_price") or risk.get("entryPrice") or "0"
+                )
+                leverage = _to_decimal_safe(risk.get("leverage") or "1") or Decimal("1")
                 notional = abs(qty) * entry_price
                 margin_used = notional / (leverage if leverage > 0 else Decimal("1"))
                 total_used += margin_used

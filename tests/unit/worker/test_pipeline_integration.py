@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from app.services.worker.application.order_executor import OrderExecutor
 from app.services.worker.application.signal_processor import SignalProcessor
-from app.services.worker.domain.enums import OrderSide, OrderStatus
+from app.services.worker.domain.enums import OrderSide, OrderStatus, SideWhitelist
 from app.services.worker.domain.models import (
     ArmSignal,
     BotConfig,
@@ -184,7 +184,7 @@ def _bot_config(symbol: str = "BTCUSDT") -> BotConfig:
         timeframe="2m",
         enabled=True,
         env="testnet",
-        side_whitelist=OrderSide.LONG,  # allows long only
+        side_whitelist=SideWhitelist.LONG,  # allows long only
         leverage=5,
         use_balance_pct=True,
         balance_pct=Decimal("0.05"),
