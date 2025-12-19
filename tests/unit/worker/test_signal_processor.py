@@ -62,6 +62,14 @@ class TradingStub:
     async def cancel_order(self, symbol: str, order_id: int) -> None:
         self.cancelled.append(order_id)
 
+    async def get_order(self, symbol: str, order_id: int) -> dict:
+        return {
+            "symbol": symbol,
+            "orderId": order_id,
+            "status": "NEW",
+            "executedQty": "0",
+        }
+
 
 class OrderExecutorStub:
     def __init__(self) -> None:

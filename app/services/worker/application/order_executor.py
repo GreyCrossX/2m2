@@ -710,30 +710,25 @@ class OrderExecutor:
                 bot, signal, quantity=q_qty, trigger_price=q_price
             )
 
-        # Validate that exchange returned ids; otherwise treat as failure and rollback defensively.
-        if not (
-            trio.entry_order_id and trio.stop_order_id and trio.take_profit_order_id
-        ):
+        if not trio.entry_order_id:
             log.error(
-                "Order placement missing order ids, rolling back | entry=%s stop=%s tp=%s | %s",
+                "Order placement returned no entry id | entry=%s stop=%s tp=%s | %s",
                 trio.entry_order_id,
                 trio.stop_order_id,
                 trio.take_profit_order_id,
                 ctx_str,
             )
-            for oid in (
+            return self._failure_state(
+                bot, signal, quantity=q_qty, trigger_price=q_price
+            )
+
+        if trio.stop_order_id is None or trio.take_profit_order_id is None:
+            log.warning(
+                "Placed entry without full exits (monitor will recover) | entry=%s stop=%s tp=%s | %s",
                 trio.entry_order_id,
                 trio.stop_order_id,
                 trio.take_profit_order_id,
-            ):
-                if oid in (None, ""):
-                    continue
-                try:
-                    await trading.cancel_order(signal.symbol, int(oid))
-                except Exception:
-                    continue
-            return self._failure_state(
-                bot, signal, quantity=q_qty, trigger_price=q_price
+                ctx_str,
             )
 
         log.info(

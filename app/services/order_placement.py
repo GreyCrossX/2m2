@@ -89,6 +89,11 @@ def _extract_order_id(resp: object) -> Optional[int]:
     return _to_int_or_none(value)
 
 
+def _is_gte_requires_open_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "time in force" in msg and "gte" in msg and "open positions" in msg
+
+
 class OrderPlacementService:
     """Provide atomic placement and rollback for entry/stop/take-profit orders."""
 
@@ -151,17 +156,41 @@ class OrderPlacementService:
         stop_id: Optional[int] = None
         tp_id: Optional[int] = None
 
+        exit_tif: str | None = "GTE_GTC"
+        has_pos = getattr(self._trading, "has_open_position", None)
+        if callable(has_pos):
+            try:
+                if not bool(await has_pos(symbol)):
+                    exit_tif = None
+            except Exception:
+                exit_tif = "GTE_GTC"
+
         try:
-            stop_resp = await self._trading.create_stop_market_order(
-                symbol=symbol,
-                side=exit_side,
-                quantity=quantity,
-                stop_price=stop_price,
-                reduce_only=True,
-                order_type="STOP_MARKET",
-                time_in_force="GTE_GTC",
-                new_client_order_id=stop_client_order_id,
-            )
+            try:
+                stop_resp = await self._trading.create_stop_market_order(
+                    symbol=symbol,
+                    side=exit_side,
+                    quantity=quantity,
+                    stop_price=stop_price,
+                    reduce_only=True,
+                    order_type="STOP_MARKET",
+                    time_in_force=exit_tif,
+                    new_client_order_id=stop_client_order_id,
+                )
+            except Exception as exc:
+                if exit_tif and _is_gte_requires_open_error(exc):
+                    stop_resp = await self._trading.create_stop_market_order(
+                        symbol=symbol,
+                        side=exit_side,
+                        quantity=quantity,
+                        stop_price=stop_price,
+                        reduce_only=True,
+                        order_type="STOP_MARKET",
+                        time_in_force=None,
+                        new_client_order_id=stop_client_order_id,
+                    )
+                else:
+                    raise
             stop_id = _extract_order_id(stop_resp)
             self._log.info(
                 "order.stop_placed",
@@ -173,22 +202,42 @@ class OrderPlacementService:
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            await self.rollback_orders(symbol, [entry_id], context=ctx)
-            raise BinanceAPIException(
-                f"create_stop_market_order failed: {exc}"
-            ) from exc
+            self._log.warning(
+                "order.stop_placement_failed",
+                extra={
+                    **ctx,
+                    "symbol": symbol,
+                    "entry_order_id": entry_id,
+                    "error": str(exc),
+                },
+            )
 
         try:
-            tp_resp = await self._trading.create_stop_market_order(
-                symbol=symbol,
-                side=exit_side,
-                quantity=quantity,
-                stop_price=take_profit_price,
-                reduce_only=True,
-                order_type="TAKE_PROFIT_MARKET",
-                time_in_force="GTE_GTC",
-                new_client_order_id=tp_client_order_id,
-            )
+            try:
+                tp_resp = await self._trading.create_stop_market_order(
+                    symbol=symbol,
+                    side=exit_side,
+                    quantity=quantity,
+                    stop_price=take_profit_price,
+                    reduce_only=True,
+                    order_type="TAKE_PROFIT_MARKET",
+                    time_in_force=exit_tif,
+                    new_client_order_id=tp_client_order_id,
+                )
+            except Exception as exc:
+                if exit_tif and _is_gte_requires_open_error(exc):
+                    tp_resp = await self._trading.create_stop_market_order(
+                        symbol=symbol,
+                        side=exit_side,
+                        quantity=quantity,
+                        stop_price=take_profit_price,
+                        reduce_only=True,
+                        order_type="TAKE_PROFIT_MARKET",
+                        time_in_force=None,
+                        new_client_order_id=tp_client_order_id,
+                    )
+                else:
+                    raise
             tp_id = _extract_order_id(tp_resp)
             self._log.info(
                 "order.tp_placed",
@@ -200,18 +249,15 @@ class OrderPlacementService:
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            await self.rollback_orders(symbol, [stop_id, entry_id], context=ctx)
-            if isinstance(exc, DomainBadRequest):
-                raise BinanceBadRequestException(str(exc)) from exc
-            if isinstance(exc, DomainRateLimit):
-                raise BinanceRateLimitException(str(exc)) from exc
-            if isinstance(exc, DomainExchangeDown):
-                raise BinanceExchangeDownException(str(exc)) from exc
-            if isinstance(exc, DomainExchangeError):
-                raise BinanceAPIException(str(exc)) from exc
-            raise BinanceAPIException(
-                f"create_take_profit_market failed: {exc}"
-            ) from exc
+            self._log.warning(
+                "order.tp_placement_failed",
+                extra={
+                    **ctx,
+                    "symbol": symbol,
+                    "entry_order_id": entry_id,
+                    "error": str(exc),
+                },
+            )
 
         return TrioOrderResult(
             entry_order_id=entry_id,

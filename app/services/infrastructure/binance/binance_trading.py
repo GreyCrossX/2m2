@@ -505,6 +505,40 @@ class BinanceTrading:
 
         return False
 
+    async def get_open_position(
+        self, symbol: str, *, position_side: str | None = None
+    ) -> Dict[str, Any] | None:
+        """
+        Return the first non-zero position record for ``symbol``, or None.
+
+        The underlying connector returns snake_case keys (e.g., ``position_amt``)
+        on the position endpoint; older clients may return camelCase.
+        """
+        sym = symbol.upper()
+        side_filter = position_side.upper() if position_side else None
+        positions = await self._client.position_information(sym)
+        for position in positions:
+            if str(position.get("symbol") or "").upper() != sym:
+                continue
+            if side_filter:
+                pos_side = position.get("position_side") or position.get("positionSide")
+                if pos_side is not None and str(pos_side).upper() != side_filter:
+                    continue
+
+            raw_amt = (
+                position.get("position_amt")
+                if "position_amt" in position
+                else position.get("positionAmt")
+            )
+            try:
+                amt = Decimal(str(raw_amt or "0"))
+            except Exception:
+                amt = Decimal("0")
+            if amt != 0:
+                return position
+
+        return None
+
     async def get_order_status(self, symbol: str, order_id: int) -> str:
         result = await self._client.query_order(
             symbol=symbol.upper(), orderId=int(order_id)

@@ -324,17 +324,15 @@ async def test_execute_order_rolls_back_when_tp_fails() -> None:
 
     state = await executor.execute_order(bot, signal)
 
-    assert state.status == OrderStatus.FAILED
-    assert state.order_id is None
-    assert state.stop_order_id is None
+    assert state.status == OrderStatus.PENDING
+    assert state.order_id == 111
+    assert state.stop_order_id == 222
     assert state.take_profit_order_id is None
 
     # stop should be placed before failure
     assert trading.stop_orders
     assert trading.tp_orders  # attempted TP placement captured
-    # entry and stop must be cancelled on rollback
-    cancelled_ids = {item["order_id"] for item in trading.cancelled}
-    assert cancelled_ids == {111, 222}
+    assert trading.cancelled == []
 
 
 async def test_execute_order_rolls_back_when_stop_fails() -> None:
@@ -347,16 +345,14 @@ async def test_execute_order_rolls_back_when_stop_fails() -> None:
 
     state = await executor.execute_order(bot, signal)
 
-    assert state.status == OrderStatus.FAILED
-    assert state.order_id is None
+    assert state.status == OrderStatus.PENDING
+    assert state.order_id == 111
     assert state.stop_order_id is None
-    assert state.take_profit_order_id is None
+    assert state.take_profit_order_id == 333
 
-    # entry must be cancelled when stop placement fails
-    cancelled_ids = [item["order_id"] for item in trading.cancelled]
-    assert cancelled_ids == [111]
-    # stop order should not remain recorded on failure
-    assert trading.tp_orders == []
+    assert trading.stop_orders  # attempted stop placement captured
+    assert trading.tp_orders
+    assert trading.cancelled == []
 
 
 async def test_execute_order_marks_failed_on_rate_limit_entry() -> None:
@@ -384,14 +380,11 @@ async def test_execute_order_rolls_back_on_rate_limit_tp() -> None:
 
     state = await executor.execute_order(bot, signal)
 
-    assert state.status == OrderStatus.FAILED
-    assert state.order_id is None
-    assert state.stop_order_id is None
+    assert state.status == OrderStatus.PENDING
+    assert state.order_id == 111
+    assert state.stop_order_id == 222
     assert state.take_profit_order_id is None
-    assert state.quantity > 0
-
-    cancelled_ids = {item["order_id"] for item in trading.cancelled}
-    assert cancelled_ids == {111, 222}
+    assert trading.cancelled == []
 
 
 async def test_execute_order_rolls_back_on_rate_limit_stop() -> None:
@@ -404,13 +397,11 @@ async def test_execute_order_rolls_back_on_rate_limit_stop() -> None:
 
     state = await executor.execute_order(bot, signal)
 
-    assert state.status == OrderStatus.FAILED
-    assert state.order_id is None
+    assert state.status == OrderStatus.PENDING
+    assert state.order_id == 111
     assert state.stop_order_id is None
-    assert state.take_profit_order_id is None
-
-    cancelled_ids = [item["order_id"] for item in trading.cancelled]
-    assert cancelled_ids == [111]
+    assert state.take_profit_order_id == 333
+    assert trading.cancelled == []
 
 
 async def test_execute_order_rolls_back_on_exchange_down_stop() -> None:
@@ -423,13 +414,11 @@ async def test_execute_order_rolls_back_on_exchange_down_stop() -> None:
 
     state = await executor.execute_order(bot, signal)
 
-    assert state.status == OrderStatus.FAILED
-    assert state.order_id is None
+    assert state.status == OrderStatus.PENDING
+    assert state.order_id == 111
     assert state.stop_order_id is None
-    assert state.take_profit_order_id is None
-
-    cancelled_ids = [item["order_id"] for item in trading.cancelled]
-    assert cancelled_ids == [111]
+    assert state.take_profit_order_id == 333
+    assert trading.cancelled == []
 
 
 def test_compute_tp_price_handles_inverted_stops() -> None:

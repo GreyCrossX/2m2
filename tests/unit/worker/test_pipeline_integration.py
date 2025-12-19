@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, cast
 from uuid import UUID, uuid4
 
 from app.services.worker.application.order_executor import OrderExecutor
+from app.services.worker.application.order_executor import (
+    TradingPort as ExecutorTradingPort,
+)
 from app.services.worker.application.signal_processor import SignalProcessor
 from app.services.worker.domain.enums import OrderSide, OrderStatus, SideWhitelist
 from app.services.worker.domain.models import (
@@ -116,6 +119,14 @@ class StubTrading:
     async def cancel_order(self, symbol: str, order_id: int) -> None:
         self.cancelled.append(order_id)
         self.open_orders = [o for o in self.open_orders if o.get("orderId") != order_id]
+
+    async def get_order(self, symbol: str, order_id: int) -> dict:
+        return {
+            "symbol": symbol,
+            "orderId": order_id,
+            "status": "NEW",
+            "executedQty": "0",
+        }
 
     async def list_open_orders(self, symbol: str | None = None) -> List[dict]:
         return list(self.open_orders)
@@ -230,8 +241,8 @@ def _build_system():
     bal = StubBalanceValidator()
     trading = StubTrading()
 
-    async def trading_factory(_: BotConfig):
-        return trading
+    async def trading_factory(_: BotConfig) -> ExecutorTradingPort:
+        return cast(ExecutorTradingPort, trading)
 
     executor = OrderExecutor(
         balance_validator=bal,
